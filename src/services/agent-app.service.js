@@ -29,12 +29,12 @@ export async function getNetworkById(id) {
 
 export async function getCategoriesForAgent(agentId) {
   const { rows } = await query(
-    `SELECT c.id, c.name, c.price, c.duration,
+    `SELECT c.id, c.name, c.price, c.duration, c.data_quota AS dataQuota,
             COUNT(CASE WHEN ca.status = 'معلق' THEN 1 END) AS availableCards
      FROM categories c
      LEFT JOIN batches b ON b.category_id = c.id AND b.agent_id = $1
      LEFT JOIN cards ca ON ca.batch_id = b.id
-     GROUP BY c.id, c.name, c.price, c.duration
+     GROUP BY c.id, c.name, c.price, c.duration, c.data_quota
      ORDER BY c.id`,
     [agentId]
   )
@@ -43,6 +43,7 @@ export async function getCategoriesForAgent(agentId) {
     name: row.name,
     price: Number(row.price),
     duration: row.duration,
+    dataQuota: row.dataQuota || '1 جيجا',
     availableCards: Number(row.availableCards) || 0,
   }))
 }

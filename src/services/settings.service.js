@@ -16,26 +16,34 @@ export async function updateCardSettings({ digits, chars }) {
 }
 
 export async function getCategories() {
-  const { rows } = await query('SELECT id, name, price, duration FROM categories ORDER BY id')
+  const { rows } = await query(
+    'SELECT id, name, price, duration, data_quota AS dataQuota FROM categories ORDER BY id'
+  )
   return rows.map((row) => ({ ...row, price: Number(row.price) }))
 }
 
-export async function createCategory({ name, price, duration }) {
+export async function createCategory({ name, price, duration, dataQuota }) {
   const { insertId } = await query(
-    'INSERT INTO categories (name, price, duration) VALUES ($1, $2, $3)',
-    [name, price, duration]
+    'INSERT INTO categories (name, price, duration, data_quota) VALUES ($1, $2, $3, $4)',
+    [name, price, duration, dataQuota || '1 جيجا']
   )
-  const { rows } = await query('SELECT id, name, price, duration FROM categories WHERE id = $1', [insertId])
+  const { rows } = await query(
+    'SELECT id, name, price, duration, data_quota AS dataQuota FROM categories WHERE id = $1',
+    [insertId]
+  )
   const row = rows[0]
   return row ? { ...row, price: Number(row.price) } : null
 }
 
-export async function updateCategory(id, { name, price, duration }) {
+export async function updateCategory(id, { name, price, duration, dataQuota }) {
   await query(
-    'UPDATE categories SET name = $1, price = $2, duration = $3 WHERE id = $4',
-    [name, price, duration, id]
+    'UPDATE categories SET name = $1, price = $2, duration = $3, data_quota = $4 WHERE id = $5',
+    [name, price, duration, dataQuota || '1 جيجا', id]
   )
-  const { rows } = await query('SELECT id, name, price, duration FROM categories WHERE id = $1', [id])
+  const { rows } = await query(
+    'SELECT id, name, price, duration, data_quota AS dataQuota FROM categories WHERE id = $1',
+    [id]
+  )
   const row = rows[0]
   return row ? { ...row, price: Number(row.price) } : null
 }

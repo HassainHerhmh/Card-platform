@@ -23,13 +23,16 @@ export async function seed() {
   )
 
   const categories = [
-    ['كرت ابو 100', 100, '24 ساعة'],
-    ['يومي', 5, '24 ساعة'],
-    ['أسبوعي', 25, 'أسبوع'],
-    ['شهري', 75, 'شهر'],
+    ['كرت ابو 100', 100, '24 ساعة', '5 جيجا'],
+    ['يومي', 5, '24 ساعة', '1 جيجا'],
+    ['أسبوعي', 25, 'أسبوع', '10 جيجا'],
+    ['شهري', 75, 'شهر', '50 جيجا'],
   ]
-  for (const [name, price, duration] of categories) {
-    await query('INSERT INTO categories (name, price, duration) VALUES ($1, $2, $3)', [name, price, duration])
+  for (const [name, price, duration, dataQuota] of categories) {
+    await query(
+      'INSERT INTO categories (name, price, duration, data_quota) VALUES ($1, $2, $3, $4)',
+      [name, price, duration, dataQuota]
+    )
   }
 
   const agentPasswordHash = await bcrypt.hash('123456', 10)

@@ -25,6 +25,7 @@ export async function migrate() {
   const patches = [
     'ALTER TABLE agents ADD COLUMN address VARCHAR(500) NULL',
     'ALTER TABLE agents ADD COLUMN password_hash VARCHAR(255) NULL',
+    "ALTER TABLE categories ADD COLUMN data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا'",
   ]
 
   for (const patch of patches) {
