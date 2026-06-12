@@ -20,9 +20,18 @@ const allowedOrigins = env.clientUrl
   .map((origin) => origin.trim())
   .filter(Boolean)
 
+function isLocalOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+}
+
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin) || env.nodeEnv !== 'production') {
+    if (
+      !origin
+      || allowedOrigins.includes(origin)
+      || isLocalOrigin(origin)
+      || env.nodeEnv !== 'production'
+    ) {
       callback(null, true)
       return
     }
