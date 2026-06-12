@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import bcrypt from 'bcryptjs'
 import { pool } from './pool.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -33,6 +34,12 @@ export async function migrate() {
       if (error.code !== 'ER_DUP_FIELDNAME') throw error
     }
   }
+
+  const defaultAgentHash = await bcrypt.hash('123456', 10)
+  await pool.execute(
+    'UPDATE agents SET password_hash = ? WHERE password_hash IS NULL OR password_hash = \'\'',
+    [defaultAgentHash]
+  )
 
   console.log('Database schema ready')
 }
