@@ -10,6 +10,7 @@ import ledgerRoutes from './routes/ledger.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
 import permissionsRoutes from './routes/permissions.routes.js'
 import mikrotikRoutes from './routes/mikrotik.routes.js'
+import errorsRoutes from './routes/errors.routes.js'
 
 const app = express()
 
@@ -60,6 +61,7 @@ app.use('/api/ledger', ledgerRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/permissions', permissionsRoutes)
 app.use('/api/mikrotik', mikrotikRoutes)
+app.use('/api/errors', errorsRoutes)
 
 app.use((err, _req, res, _next) => {
   console.error(err)
