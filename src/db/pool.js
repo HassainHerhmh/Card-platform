@@ -24,7 +24,7 @@ export const pool = env.databaseUrl
       uri: env.databaseUrl,
       waitForConnections: true,
       connectionLimit: 10,
-      ssl: env.nodeEnv === 'production' ? {} : undefined,
+      ssl: env.nodeEnv === 'production' ? { rejectUnauthorized: false } : undefined,
     })
   : null
 
