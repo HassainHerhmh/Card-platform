@@ -39,7 +39,7 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json())
+app.use(express.json({ limit: '100kb' }))
 
 app.get('/api/health', async (_req, res) => {
   let dbConnected = false
@@ -75,6 +75,13 @@ app.use('/api/mikrotik', mikrotikRoutes)
 app.use('/api/errors', errorsRoutes)
 
 app.use((err, _req, res, _next) => {
+  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    console.error('[BAD-JSON]', err.body || err.message)
+    return res.status(400).json({ message: 'بيانات الطلب غير صالحة' })
+  }
+  if (err.status === 400) {
+    return res.status(400).json({ message: err.message || 'طلب غير صالح' })
+  }
   console.error(err)
   res.status(500).json({ message: 'خطأ داخلي في السيرفر' })
 })
