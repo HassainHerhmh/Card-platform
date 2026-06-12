@@ -67,15 +67,11 @@ router.put('/:id', async (req, res) => {
 
 router.put('/:id/password', async (req, res) => {
   try {
-    const { password } = req.body
-    if (!password || password.length < 6) {
-      return res.status(400).json({ message: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' })
-    }
-    await agentsService.updatePassword(+req.params.id, password)
-    res.json({ ok: true })
+    const password = await agentsService.resetAgentPassword(+req.params.id)
+    res.json({ ok: true, password })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر تحديث كلمة المرور' })
+    res.status(500).json({ message: 'تعذر توليد كلمة المرور' })
   }
 })
 

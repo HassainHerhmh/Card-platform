@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs'
 import { query } from '../db/pool.js'
+import { generateStrongPassword } from '../utils/password.js'
 
 function mapAgent(row) {
   return {
@@ -48,9 +49,15 @@ export async function updateAgent(id, { name, phone, address }) {
   return row ? mapAgent(row) : null
 }
 
-export async function updatePassword(id, password) {
+async function updatePassword(id, password) {
   const passwordHash = await bcrypt.hash(password, 10)
   await query('UPDATE agents SET password_hash = $1 WHERE id = $2', [passwordHash, id])
+}
+
+export async function resetAgentPassword(id) {
+  const password = generateStrongPassword(9)
+  await updatePassword(id, password)
+  return password
 }
 
 export async function toggleAgentStatus(id) {
