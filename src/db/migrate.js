@@ -46,5 +46,17 @@ export async function migrate() {
     await pool.execute('UPDATE agents SET password_hash = ? WHERE phone = ?', [defaultAgentHash, phone])
   }
 
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS agent_devices (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      agent_id INT NOT NULL,
+      device_id VARCHAR(100) NOT NULL,
+      label VARCHAR(255),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+      UNIQUE KEY unique_agent_device (agent_id, device_id)
+    )
+  `)
+
   console.log('Database schema ready')
 }

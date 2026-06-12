@@ -2,7 +2,22 @@ import bcrypt from 'bcryptjs'
 import { query } from '../db/pool.js'
 import { generateStrongPassword } from '../utils/password.js'
 
-function mapAgent(row) {
+function normalizeDevices(devices = []) {
+  const seen = new Set()
+  const normalized = []
+  for (const item of devices) {
+    const deviceId = String(item?.deviceId || item?.device_id || '').trim()
+    if (!deviceId || seen.has(deviceId)) continue
+    seen.add(deviceId)
+    normalized.push({
+      deviceId,
+      label: String(item?.label || '').trim(),
+    })
+  }
+  return normalized
+}
+
+function mapAgent(row, devices = []) {
   return {
     id: row.id,
     name: row.name,
@@ -11,6 +26,25 @@ function mapAgent(row) {
     balance: Number(row.balance),
     status: row.status,
     cardsSold: row.cardsSold ?? row.cards_sold ?? 0,
+    devices,
+  }
+}
+
+async function getDevicesForAgent(agentId) {
+  const { rows } = await query(
+    'SELECT id, device_id AS deviceId, label FROM agent_devices WHERE agent_id = $1 ORDER BY id',
+    [agentId]
+  )
+  return rows
+}
+
+async function syncAgentDevices(agentId, devices) {
+  await query('DELETE FROM agent_devices WHERE agent_id = $1', [agentId])
+  for (const device of normalizeDevices(devices)) {
+    await query(
+      'INSERT INTO agent_devices (agent_id, device_id, label) VALUES ($1, $2, $3)',
+      [agentId, device.deviceId, device.label || null]
+    )
   }
 }
 
@@ -32,31 +66,62 @@ export async function verifyPassword(agent, password) {
   return bcrypt.compare(password, agent.password_hash)
 }
 
+export async function getAgentDevices(agentId) {
+  return getDevicesForAgent(agentId)
+}
+
+export async function isDeviceAllowed(agentId, deviceId) {
+  const { rows } = await query(
+    'SELECT id FROM agent_devices WHERE agent_id = $1 AND device_id = $2',
+    [agentId, deviceId]
+  )
+  return rows.length > 0
+}
+
 export async function getAgents() {
   const { rows } = await query(
     'SELECT id, name, phone, address, balance, status, cards_sold AS cardsSold FROM agents ORDER BY id'
   )
-  return rows.map(mapAgent)
+  const agents = []
+  for (const row of rows) {
+    const devices = await getDevicesForAgent(row.id)
+    agents.push(mapAgent(row, devices))
+  }
+  return agents
 }
 
-export async function createAgent({ name, phone, address, password }) {
+export async function createAgent({ name, phone, address, password, devices }) {
+  const normalizedDevices = normalizeDevices(devices)
+  if (normalizedDevices.length === 0) {
+    throw new Error('يجب إضافة جهاز واحد على الأقل')
+  }
+
   const passwordHash = await bcrypt.hash(password, 10)
   const { insertId } = await query(
     `INSERT INTO agents (name, phone, address, password_hash, balance, status, cards_sold)
      VALUES ($1, $2, $3, $4, 0, 'نشط', 0)`,
     [name, phone || null, address || null, passwordHash]
   )
+  await syncAgentDevices(insertId, normalizedDevices)
   const row = await findAgentRow(insertId)
-  return row ? mapAgent(row) : null
+  const agentDevices = await getDevicesForAgent(insertId)
+  return row ? mapAgent(row, agentDevices) : null
 }
 
-export async function updateAgent(id, { name, phone, address }) {
+export async function updateAgent(id, { name, phone, address, devices }) {
+  const normalizedDevices = normalizeDevices(devices)
+  if (normalizedDevices.length === 0) {
+    throw new Error('يجب إضافة جهاز واحد على الأقل')
+  }
+
   await query(
     'UPDATE agents SET name = $1, phone = $2, address = $3 WHERE id = $4',
     [name, phone || null, address || null, id]
   )
+  await syncAgentDevices(id, normalizedDevices)
   const row = await findAgentRow(id)
-  return row ? mapAgent(row) : null
+  const agentDevices = await getDevicesForAgent(id)
+  return row ? mapAgent(row, agentDevices) : null
 }
 
 async function updatePassword(id, password) {
@@ -77,9 +142,10 @@ export async function toggleAgentStatus(id) {
     [id]
   )
   const row = await findAgentRow(id)
-  return row ? mapAgent(row) : null
+  const devices = await getDevicesForAgent(id)
+  return row ? mapAgent(row, devices) : null
 }
 
-export function toPublicAgent(row) {
-  return mapAgent(row)
+export function toPublicAgent(row, devices = []) {
+  return mapAgent(row, devices)
 }

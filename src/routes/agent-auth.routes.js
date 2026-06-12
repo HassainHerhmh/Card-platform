@@ -7,9 +7,12 @@ const router = Router()
 
 router.post('/login', async (req, res) => {
   try {
-    const { phone, password } = req.body
+    const { phone, password, deviceId } = req.body
     if (!phone?.trim() || !password) {
       return res.status(400).json({ message: 'رقم الجوال وكلمة المرور مطلوبان' })
+    }
+    if (!deviceId?.trim()) {
+      return res.status(400).json({ message: 'معرف الجهاز مطلوب' })
     }
 
     const agent = await agentsService.findByPhone(phone.trim())
@@ -22,15 +25,24 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' })
     }
 
+    const deviceAllowed = await agentsService.isDeviceAllowed(agent.id, deviceId.trim())
+    if (!deviceAllowed) {
+      return res.status(403).json({
+        message: 'هذا الجهاز غير مسجّل — أضف معرف الجهاز من لوحة التحكم أولاً',
+      })
+    }
+
     const token = jwt.sign(
-      { id: agent.id, phone: agent.phone, type: 'agent' },
+      { id: agent.id, phone: agent.phone, type: 'agent', deviceId: deviceId.trim() },
       env.jwtSecret,
       { expiresIn: '24h' }
     )
 
+    const devices = await agentsService.getAgentDevices(agent.id)
+
     return res.json({
       token,
-      agent: agentsService.toPublicAgent(agent),
+      agent: agentsService.toPublicAgent(agent, devices),
     })
   } catch (error) {
     console.error(error)

@@ -16,7 +16,7 @@ router.get('/', async (_req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, phone, address, password } = req.body
+    const { name, phone, address, password, devices } = req.body
 
     if (!name?.trim()) {
       return res.status(400).json({ message: 'اسم الوكيل مطلوب' })
@@ -33,17 +33,18 @@ router.post('/', async (req, res) => {
       phone: phone.trim(),
       address: address?.trim() || '',
       password,
+      devices,
     })
     res.status(201).json({ agent })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر إضافة الوكيل' })
+    res.status(400).json({ message: error.message || 'تعذر إضافة الوكيل' })
   }
 })
 
 router.put('/:id', async (req, res) => {
   try {
-    const { name, phone, address } = req.body
+    const { name, phone, address, devices } = req.body
 
     if (!name?.trim()) {
       return res.status(400).json({ message: 'اسم الوكيل مطلوب' })
@@ -56,12 +57,13 @@ router.put('/:id', async (req, res) => {
       name: name.trim(),
       phone: phone.trim(),
       address: address?.trim() || '',
+      devices,
     })
     if (!agent) return res.status(404).json({ message: 'الوكيل غير موجود' })
     res.json({ agent })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر تحديث الوكيل' })
+    res.status(400).json({ message: error.message || 'تعذر تحديث الوكيل' })
   }
 })
 

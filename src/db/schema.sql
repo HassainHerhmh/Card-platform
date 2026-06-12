@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS mikrotik_routers (
   cards_printed INT DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS agent_devices (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  agent_id INT NOT NULL,
+  device_id VARCHAR(100) NOT NULL,
+  label VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+  UNIQUE KEY unique_agent_device (agent_id, device_id)
+);
+
 CREATE TABLE IF NOT EXISTS user_permissions (
   user_id INT PRIMARY KEY,
   permissions JSON NOT NULL,
