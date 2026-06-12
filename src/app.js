@@ -11,6 +11,7 @@ import reportsRoutes from './routes/reports.routes.js'
 import permissionsRoutes from './routes/permissions.routes.js'
 import mikrotikRoutes from './routes/mikrotik.routes.js'
 import errorsRoutes from './routes/errors.routes.js'
+import agentAuthRoutes from './routes/agent-auth.routes.js'
 
 const app = express()
 
@@ -53,6 +54,7 @@ app.get('/api/health', async (_req, res) => {
 })
 
 app.use('/api/auth', authRoutes)
+app.use('/api/agent-auth', agentAuthRoutes)
 app.use('/api/users', usersRoutes)
 app.use('/api/settings', settingsRoutes)
 app.use('/api/agents', agentsRoutes)

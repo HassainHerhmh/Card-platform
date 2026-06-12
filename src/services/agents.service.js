@@ -22,6 +22,16 @@ async function findAgentRow(id) {
   return rows[0] || null
 }
 
+export async function findByPhone(phone) {
+  const { rows } = await query('SELECT * FROM agents WHERE phone = $1', [phone])
+  return rows[0] || null
+}
+
+export async function verifyPassword(agent, password) {
+  if (!agent?.password_hash) return false
+  return bcrypt.compare(password, agent.password_hash)
+}
+
 export async function getAgents() {
   const { rows } = await query(
     'SELECT id, name, phone, address, balance, status, cards_sold AS cardsSold FROM agents ORDER BY id'
@@ -68,4 +78,8 @@ export async function toggleAgentStatus(id) {
   )
   const row = await findAgentRow(id)
   return row ? mapAgent(row) : null
+}
+
+export function toPublicAgent(row) {
+  return mapAgent(row)
 }
