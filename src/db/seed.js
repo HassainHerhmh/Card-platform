@@ -32,16 +32,18 @@ export async function seed() {
     await query('INSERT INTO categories (name, price, duration) VALUES ($1, $2, $3)', [name, price, duration])
   }
 
+  const agentPasswordHash = await bcrypt.hash('123456', 10)
   const agents = [
-    ['أحمد السالم', '0501234567', 15000, 'نشط', 245],
-    ['محمد العتيبي', '0559876543', 8500, 'نشط', 178],
-    ['خالد الدوسري', '0541112233', 3200, 'معلق', 92],
-    ['فهد القحطاني', '0567778899', 22000, 'نشط', 410],
+    ['أحمد السالم', '0501234567', 'الرياض', 15000, 'نشط', 245],
+    ['محمد العتيبي', '0559876543', 'جدة', 8500, 'نشط', 178],
+    ['خالد الدوسري', '0541112233', 'الدمام', 3200, 'معلق', 92],
+    ['فهد القحطاني', '0567778899', 'مكة', 22000, 'نشط', 410],
   ]
-  for (const [name, phone, balance, status, cardsSold] of agents) {
+  for (const [name, phone, address, balance, status, cardsSold] of agents) {
     await query(
-      'INSERT INTO agents (name, phone, balance, status, cards_sold) VALUES ($1, $2, $3, $4, $5)',
-      [name, phone, balance, status, cardsSold]
+      `INSERT INTO agents (name, phone, address, password_hash, balance, status, cards_sold)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [name, phone, address, agentPasswordHash, balance, status, cardsSold]
     )
   }
 

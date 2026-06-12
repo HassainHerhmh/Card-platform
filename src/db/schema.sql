@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS agents (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   phone VARCHAR(50),
+  address VARCHAR(500),
+  password_hash VARCHAR(255) NOT NULL,
   balance DECIMAL(12, 2) DEFAULT 0,
   status VARCHAR(50) DEFAULT 'نشط',
   cards_sold INT DEFAULT 0
