@@ -1,24 +1,44 @@
 import { Router } from 'express'
 import jwt from 'jsonwebtoken'
 import { env } from '../config/env.js'
+import * as usersService from '../services/users.service.js'
 
 const router = Router()
 
-router.post('/login', (req, res) => {
-  const { username, password } = req.body
+router.post('/login', async (req, res) => {
+  try {
+    const { username, password } = req.body
+    const user = await usersService.findByUsername(username)
+    if (!user || user.status !== 'نشط') {
+      return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' })
+    }
 
-  if (username === 'admin' && password === '123456') {
-    const token = jwt.sign({ id: 1, username: 'admin', role: 'مدير' }, env.jwtSecret, {
-      expiresIn: '8h',
-    })
+    const valid = await usersService.verifyPassword(user, password)
+    if (!valid) {
+      return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' })
+    }
+
+    await usersService.updateLastLogin(user.id)
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      env.jwtSecret,
+      { expiresIn: '8h' }
+    )
 
     return res.json({
       token,
-      user: { id: 1, name: 'مدير النظام', username: 'admin', role: 'مدير' },
+      user: {
+        id: user.id,
+        name: user.name,
+        username: user.username,
+        role: user.role,
+      },
     })
+  } catch (error) {
+    console.error(error)
+    return res.status(500).json({ message: 'خطأ في تسجيل الدخول' })
   }
-
-  return res.status(401).json({ message: 'بيانات الدخول غير صحيحة' })
 })
 
 export default router

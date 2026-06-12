@@ -7,6 +7,7 @@ export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   jwtSecret: process.env.JWT_SECRET || 'dev-only-secret-change-me',
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
+  databaseUrl: process.env.DATABASE_URL || process.env.MYSQL_URL || '',
   mikrotik: {
     host: process.env.MIKROTIK_HOST || '',
     port: Number(process.env.MIKROTIK_PORT) || 8728,
