@@ -41,5 +41,10 @@ export async function migrate() {
     [defaultAgentHash]
   )
 
+  const seedPhones = ['0501234567', '0559876543', '0541112233', '0567778899']
+  for (const phone of seedPhones) {
+    await pool.execute('UPDATE agents SET password_hash = ? WHERE phone = ?', [defaultAgentHash, phone])
+  }
+
   console.log('Database schema ready')
 }
