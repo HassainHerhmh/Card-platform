@@ -7,6 +7,7 @@ router.use(requireGatewayAuth)
 
 router.get('/stats', async (_req, res) => {
   try {
+    await smsGatewayService.touchGatewayHeartbeat()
     const stats = await smsGatewayService.getGatewayStats()
     res.json({ stats })
   } catch (error) {
@@ -17,6 +18,7 @@ router.get('/stats', async (_req, res) => {
 
 router.get('/pending', async (req, res) => {
   try {
+    await smsGatewayService.touchGatewayHeartbeat()
     const messages = await smsGatewayService.getPendingSms(req.query.limit)
     res.json({ messages })
   } catch (error) {

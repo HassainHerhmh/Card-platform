@@ -1,4 +1,9 @@
 import { query } from '../db/pool.js'
+import { env } from '../config/env.js'
+
+const GATEWAY_ONLINE_SECONDS = 30
+const SMS_SERVICE_UNAVAILABLE =
+  'توجد مشكلة في الخدمة حالياً، لم يُنفّذ الطلب'
 
 function normalizeRecipientPhone(raw) {
   let digits = String(raw || '').replace(/\D/g, '')
@@ -36,6 +41,35 @@ export async function reserveCardForAgent(agentId, categoryId) {
   return rows[0] || null
 }
 
+export async function touchGatewayHeartbeat() {
+  await query(
+    `INSERT INTO sms_gateway_heartbeat (id, last_seen_at) VALUES (1, NOW())
+     ON DUPLICATE KEY UPDATE last_seen_at = NOW()`
+  )
+}
+
+export async function isSmsGatewayOnline() {
+  if (!env.smsGatewayToken) return false
+  const { rows } = await query(
+    'SELECT last_seen_at AS lastSeenAt FROM sms_gateway_heartbeat WHERE id = 1'
+  )
+  if (!rows[0]?.lastSeenAt) return false
+  const ageMs = Date.now() - new Date(rows[0].lastSeenAt).getTime()
+  return ageMs <= GATEWAY_ONLINE_SECONDS * 1000
+}
+
+export async function getSmsServiceStatus() {
+  const configured = Boolean(env.smsGatewayToken)
+  const online = configured ? await isSmsGatewayOnline() : false
+  return { configured, online, available: online }
+}
+
+export async function assertSmsGatewayAvailable() {
+  if (!env.smsGatewayToken || !(await isSmsGatewayOnline())) {
+    throw new Error(SMS_SERVICE_UNAVAILABLE)
+  }
+}
+
 export async function processAgentCharge({
   agentId,
   categoryId,
@@ -43,6 +77,10 @@ export async function processAgentCharge({
   recipientPhone,
   sendSms,
 }) {
+  if (sendSms) {
+    await assertSmsGatewayAvailable()
+  }
+
   const phone = normalizeRecipientPhone(recipientPhone)
   if (phone.length < 11) {
     throw new Error('رقم الهاتف غير صالح')

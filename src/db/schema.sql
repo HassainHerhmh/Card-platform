@@ -83,6 +83,11 @@ CREATE TABLE IF NOT EXISTS agent_devices (
   UNIQUE KEY unique_agent_device (agent_id, device_id)
 );
 
+CREATE TABLE IF NOT EXISTS sms_gateway_heartbeat (
+  id TINYINT PRIMARY KEY DEFAULT 1,
+  last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS sms_queue (
   id INT AUTO_INCREMENT PRIMARY KEY,
   recipient_phone VARCHAR(20) NOT NULL,
