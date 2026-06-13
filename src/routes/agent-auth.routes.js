@@ -28,7 +28,7 @@ router.post('/login', async (req, res) => {
     const deviceAllowed = await agentsService.isDeviceAllowed(agent.id, deviceId.trim())
     if (!deviceAllowed) {
       return res.status(403).json({
-        message: 'هذا الجهاز غير مسجّل — أضف معرف الجهاز من لوحة التحكم أولاً',
+        message: 'هذا الجهاز غير مصرح راجع الادارة',
       })
     }
 
