@@ -639,6 +639,7 @@ function mapUserManagerProfileRow(p, limitation) {
     nameForUsers: p['name-for-users'] || '',
     uptimeLimit: limitation?.['uptime-limit'] || p['uptime-limit'] || '',
     downloadLimit: limitation?.['download-limit'] || p['download-limit'] || '',
+    transferLimit: limitation?.['transfer-limit'] || p['transfer-limit'] || '',
   }
 }
 
@@ -705,7 +706,9 @@ function umProfileDurationParts(profile) {
 }
 
 function umProfileDataQuota(profile) {
-  if (profile.downloadLimit) return profile.downloadLimit
+  if (profile.downloadLimit && profile.downloadLimit !== '0') return profile.downloadLimit
+  const transfer = formatBytesQuota(profile.transferLimit)
+  if (transfer) return transfer
   if (profile.nameForUsers) return profile.nameForUsers
   return '1 جيجا'
 }
@@ -797,39 +800,240 @@ export async function getUserManagerInventory() {
   })
 }
 
-export async function getCombinedInventory() {
-  let hotspotResult = null
-  let userManagerResult = null
-  let userManagerAvailable = true
+function normalizeInventoryPeriod(period) {
+  if (period === 'day' || period === 'month') return period
+  return 'week'
+}
 
-  try {
-    hotspotResult = await getHotspotInventory()
-  } catch (error) {
-    console.warn('[mikrotik] hotspot inventory failed:', error.message)
-  }
+function periodLabelAr(period) {
+  if (period === 'day') return 'اليوم'
+  if (period === 'month') return 'آخر 30 يوم'
+  return 'آخر 7 أيام'
+}
 
-  try {
-    userManagerResult = await getUserManagerInventory()
-  } catch (error) {
-    if (isUserManagerUnavailable(error)) {
-      userManagerAvailable = false
-    } else {
-      console.warn('[mikrotik] user-manager inventory failed:', error.message)
+function periodSqlWhere(period) {
+  if (period === 'day') return 'b.printed_at >= CURDATE()'
+  if (period === 'month') return 'b.printed_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)'
+  return 'b.printed_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)'
+}
+
+async function getPrintedCardsForPeriod(period) {
+  const normalized = normalizeInventoryPeriod(period)
+  const { rows } = await query(
+    `SELECT c.code, c.status AS dbStatus, b.category_name AS categoryName,
+            b.printed_at AS printedAt, b.router_source AS routerSource,
+            COALESCE(cat.router_profile, b.category_name) AS profile
+     FROM cards c
+     INNER JOIN batches b ON b.id = c.batch_id
+     LEFT JOIN categories cat ON cat.id = b.category_id
+     WHERE ${periodSqlWhere(normalized)}
+     ORDER BY b.printed_at DESC, c.id DESC
+     LIMIT 10000`
+  )
+  return { rows, period: normalized, truncated: rows.length >= 10000 }
+}
+
+async function fetchHotspotUsersIndexed(api, codeSet) {
+  const activeSessions = await api.write('/ip/hotspot/active/print').catch(() => [])
+  const activeUsernames = new Set(
+    (activeSessions || []).map((s) => s.user).filter(Boolean)
+  )
+
+  const byName = new Map()
+  const proplist = ['=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out']
+
+  if (codeSet.size > 0 && codeSet.size <= 400) {
+    const codes = [...codeSet]
+    const batchSize = 30
+    for (let i = 0; i < codes.length; i += batchSize) {
+      const batch = codes.slice(i, i + batchSize)
+      await Promise.all(batch.map(async (code) => {
+        try {
+          const rows = await api.write('/ip/hotspot/user/print', [`?name=${code}`, ...proplist])
+          if (rows?.[0]?.name) byName.set(rows[0].name, mapHotspotUserRow(rows[0]))
+        } catch {
+          // skip missing
+        }
+      }))
+    }
+  } else if (codeSet.size > 400) {
+    const usersRaw = await api.write('/ip/hotspot/user/print', proplist)
+    for (const u of usersRaw || []) {
+      if (u.name && codeSet.has(u.name)) byName.set(u.name, mapHotspotUserRow(u))
     }
   }
 
-  const hotspotCards = (hotspotResult?.cards || []).map((card) => ({
-    ...card,
+  return { byName, activeUsernames, activeSessions: activeSessions || [] }
+}
+
+async function fetchUserManagerUsersIndexed(api, codeSet) {
+  const sessions = await api.write('/tool/user-manager/session/print').catch(() => [])
+  const activeUsernames = new Set(
+    (sessions || []).map((s) => s.user || s.username).filter(Boolean)
+  )
+
+  const byName = new Map()
+
+  if (codeSet.size > 0 && codeSet.size <= 400) {
+    const codes = [...codeSet]
+    const batchSize = 30
+    for (let i = 0; i < codes.length; i += batchSize) {
+      await Promise.all(codes.slice(i, i + batchSize).map(async (code) => {
+        for (const queryWord of [`?username=${code}`, `?name=${code}`]) {
+          try {
+            const rows = await api.write('/tool/user-manager/user/print', [queryWord])
+            const row = rows?.find((r) => (r.username || r.name) === code)
+            if (row) {
+              byName.set(code, mapUserManagerUserRow(row))
+              break
+            }
+          } catch {
+            // try next query field
+          }
+        }
+      }))
+    }
+  } else if (codeSet.size > 400) {
+    const usersRaw = await api.write('/tool/user-manager/user/print')
+    for (const u of usersRaw || []) {
+      const name = u.username || u.name
+      if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
+    }
+  }
+
+  return { byName, activeUsernames, sessions: sessions || [] }
+}
+
+function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
+  const { status, label } = resolveCardStatus(row, activeUsernames)
+  const activeSession = activeSessions.find((s) => s.user === row.name)
+  return {
+    ...row,
+    status,
+    statusLabel: label,
+    connectedIp: activeSession?.address || '',
+    sessionUptime: activeSession?.uptime || '',
     source: ROUTER_SOURCE.HOTSPOT,
     sourceLabel: routerSourceLabel(ROUTER_SOURCE.HOTSPOT),
     sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
-  }))
+  }
+}
 
-  const userManagerCards = userManagerResult?.cards || []
+function buildUserManagerInventoryCard(row, activeUsernames, sessions) {
+  const { status, label } = resolveCardStatus(row, activeUsernames, hasUserManagerUsage)
+  const activeSession = sessions.find((s) => (s.user || s.username) === row.name)
+  return {
+    ...row,
+    status,
+    statusLabel: label,
+    connectedIp: activeSession?.['ip-address'] || activeSession?.address || '',
+    sessionUptime: activeSession?.uptime || '',
+    source: ROUTER_SOURCE.USER_MANAGER,
+    sourceLabel: routerSourceLabel(ROUTER_SOURCE.USER_MANAGER),
+    sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.USER_MANAGER),
+  }
+}
 
-  const cards = [...hotspotCards, ...userManagerCards].sort((a, b) =>
-    a.name.localeCompare(b.name, undefined, { numeric: true })
-  )
+function buildMissingInventoryCard(dbRow) {
+  const source = normalizeRouterSource(dbRow.routerSource)
+  return {
+    id: dbRow.code,
+    name: dbRow.code,
+    profile: dbRow.profile || dbRow.categoryName,
+    comment: dbRow.categoryName,
+    disabled: false,
+    uptime: '',
+    status: 'missing',
+    statusLabel: 'غير على الراوتر',
+    connectedIp: '',
+    sessionUptime: '',
+    printedAt: dbRow.printedAt,
+    dbStatus: dbRow.dbStatus,
+    source,
+    sourceLabel: routerSourceLabel(source),
+    sourceLabelAr: routerSourceLabelAr(source),
+  }
+}
+
+export async function getCombinedInventory(options = {}) {
+  const period = normalizeInventoryPeriod(options.period)
+  const { rows: dbRows, truncated } = await getPrintedCardsForPeriod(period)
+
+  if (!dbRows.length) {
+    return {
+      cards: [],
+      summary: {
+        total: 0,
+        available: 0,
+        connected: 0,
+        expired: 0,
+        disabled: 0,
+        missing: 0,
+        hotspot: 0,
+        userManager: 0,
+      },
+      period,
+      periodLabel: periodLabelAr(period),
+      truncated: false,
+      sources: { hotspot: false, userManager: false },
+      userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      fetchedAt: new Date().toISOString(),
+    }
+  }
+
+  const codeSet = new Set(dbRows.map((r) => r.code))
+  const codesBySource = { hotspot: new Set(), 'user-manager': new Set() }
+  for (const row of dbRows) {
+    const source = normalizeRouterSource(row.routerSource)
+    codesBySource[source === ROUTER_SOURCE.USER_MANAGER ? 'user-manager' : 'hotspot'].add(row.code)
+  }
+
+  let hotspotIndex = { byName: new Map(), activeUsernames: new Set(), activeSessions: [] }
+  let umIndex = { byName: new Map(), activeUsernames: new Set(), sessions: [] }
+  let userManagerAvailable = true
+  let hotspotOk = false
+  let umOk = false
+
+  try {
+    await withConnection(async (api) => {
+      if (codesBySource.hotspot.size > 0) {
+        hotspotIndex = await fetchHotspotUsersIndexed(api, codesBySource.hotspot)
+        hotspotOk = true
+      }
+      if (codesBySource['user-manager'].size > 0) {
+        try {
+          umIndex = await fetchUserManagerUsersIndexed(api, codesBySource['user-manager'])
+          umOk = true
+        } catch (error) {
+          if (isUserManagerUnavailable(error)) userManagerAvailable = false
+          else throw error
+        }
+      }
+    })
+  } catch (error) {
+    console.warn('[mikrotik] inventory period fetch failed:', error.message)
+    throw error
+  }
+
+  const cards = dbRows.map((dbRow) => {
+    const source = normalizeRouterSource(dbRow.routerSource)
+    const cardWithDate = { printedAt: dbRow.printedAt, dbStatus: dbRow.dbStatus }
+
+    if (source === ROUTER_SOURCE.USER_MANAGER) {
+      const row = umIndex.byName.get(dbRow.code)
+      if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
+      return { ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate }
+    }
+
+    const row = hotspotIndex.byName.get(dbRow.code)
+    if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
+    return {
+      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
+      ...cardWithDate,
+    }
+  })
+
+  cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
 
   const summary = {
     total: cards.length,
@@ -837,19 +1041,23 @@ export async function getCombinedInventory() {
     connected: cards.filter((c) => c.status === 'connected').length,
     expired: cards.filter((c) => c.status === 'expired').length,
     disabled: cards.filter((c) => c.status === 'disabled').length,
-    hotspot: hotspotCards.length,
-    userManager: userManagerCards.length,
+    missing: cards.filter((c) => c.status === 'missing').length,
+    hotspot: cards.filter((c) => c.source === ROUTER_SOURCE.HOTSPOT).length,
+    userManager: cards.filter((c) => c.source === ROUTER_SOURCE.USER_MANAGER).length,
   }
 
   return {
     cards,
     summary,
+    period,
+    periodLabel: periodLabelAr(period),
+    truncated,
     sources: {
-      hotspot: Boolean(hotspotResult),
-      userManager: userManagerAvailable && Boolean(userManagerResult),
+      hotspot: hotspotOk || codesBySource.hotspot.size === 0,
+      userManager: userManagerAvailable && (umOk || codesBySource['user-manager'].size === 0),
     },
-    userManager: userManagerResult?.userManager || {
-      available: userManagerAvailable && Boolean(userManagerResult),
+    userManager: {
+      available: userManagerAvailable,
       customers: [],
       defaultCustomer: null,
       profiles: 0,

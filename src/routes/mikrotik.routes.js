@@ -90,9 +90,10 @@ router.get('/profiles', async (_req, res) => {
   }
 })
 
-router.get('/inventory', async (_req, res) => {
+router.get('/inventory', async (req, res) => {
   try {
-    const inventory = await getCombinedInventory()
+    const period = req.query.period || 'week'
+    const inventory = await getCombinedInventory({ period })
     res.json(inventory)
   } catch (error) {
     console.error(error)
