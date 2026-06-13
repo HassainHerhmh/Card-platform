@@ -2,7 +2,7 @@ import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
 import { recordCardSale } from './ledger.service.js'
 
-const GATEWAY_ONLINE_SECONDS = 30
+const GATEWAY_ONLINE_SECONDS = 90
 const SMS_SERVICE_UNAVAILABLE =
   'توجد مشكلة في الخدمة حالياً، لم يُنفّذ الطلب'
 
