@@ -119,7 +119,7 @@ export async function getAgentTransactions(agentId, limit = 20) {
     if (isSale) {
       if (row.smsStatus === 'pending') {
         statusType = 'pending'
-        status = 'انتظار'
+        status = 'جاري الانتظار'
         statusNote = 'تم ارسال SMS'
       } else if (row.smsStatus === 'failed') {
         statusType = 'failed'
