@@ -801,29 +801,78 @@ export async function getUserManagerInventory() {
 }
 
 function normalizeInventoryPeriod(period) {
-  if (period === 'day' || period === 'month') return period
-  return 'week'
+  if (period === 'day' || period === 'month' || period === 'week' || period === 'all') return period
+  return 'day'
+}
+
+function resolveInventoryFilter(options = {}) {
+  const date = String(options.date || '').trim()
+  const month = String(options.month || '').trim()
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return {
+      type: 'date',
+      date,
+      period: 'date',
+      periodLabel: `يوم ${date}`,
+    }
+  }
+
+  if (/^\d{4}-\d{2}$/.test(month)) {
+    const [year, monthNum] = month.split('-')
+    return {
+      type: 'monthPick',
+      year,
+      month: monthNum,
+      period: 'monthPick',
+      periodLabel: `شهر ${monthNum}/${year}`,
+    }
+  }
+
+  const period = normalizeInventoryPeriod(options.period || 'day')
+  if (period === 'all') {
+    return { type: 'all', period, periodLabel: 'كل الكروت' }
+  }
+
+  return { type: 'preset', period, periodLabel: periodLabelAr(period) }
+}
+
+function buildInventoryWhere(filter) {
+  switch (filter.type) {
+    case 'date':
+      return { clause: 'DATE(b.printed_at) = ?', params: [filter.date] }
+    case 'monthPick':
+      return { clause: 'YEAR(b.printed_at) = ? AND MONTH(b.printed_at) = ?', params: [filter.year, filter.month] }
+    case 'all':
+      return { clause: '1=1', params: [] }
+    default:
+      return { clause: periodSqlWhere(filter.period), params: [] }
+  }
 }
 
 function periodLabelAr(period) {
   if (period === 'day') return 'اليوم'
   if (period === 'month') return 'آخر 30 يوم'
+  if (period === 'all') return 'كل الكروت'
   return 'آخر 7 أيام'
 }
 
 function periodSqlWhere(period) {
   if (period === 'day') return 'b.printed_at >= CURDATE()'
   if (period === 'month') return 'b.printed_at >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)'
+  if (period === 'all') return '1=1'
   return 'b.printed_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)'
 }
 
-async function countPrintedCardsForPeriod(period) {
-  const normalized = normalizeInventoryPeriod(period)
+async function countPrintedCardsForPeriod(filterOptions = {}) {
+  const filter = resolveInventoryFilter(filterOptions)
+  const { clause, params } = buildInventoryWhere(filter)
   const { rows } = await query(
     `SELECT COUNT(*) AS cnt
      FROM cards c
      INNER JOIN batches b ON b.id = c.batch_id
-     WHERE ${periodSqlWhere(normalized)}`
+     WHERE ${clause}`,
+    params
   )
   const dbTotal = Number(rows[0]?.cnt) || 0
   const cap = 10000
@@ -831,17 +880,18 @@ async function countPrintedCardsForPeriod(period) {
     total: Math.min(dbTotal, cap),
     dbTotal,
     truncated: dbTotal > cap,
-    period: normalized,
-    periodLabel: periodLabelAr(normalized),
+    period: filter.period,
+    periodLabel: filter.periodLabel,
   }
 }
 
-export async function getInventoryCount(period) {
-  return countPrintedCardsForPeriod(period)
+export async function getInventoryCount(filterOptions = {}) {
+  return countPrintedCardsForPeriod(filterOptions)
 }
 
-async function getPrintedCardsForPeriod(period, { offset = 0, limit = 10000 } = {}) {
-  const normalized = normalizeInventoryPeriod(period)
+async function getPrintedCardsForPeriod(filterOptions = {}, { offset = 0, limit = 10000 } = {}) {
+  const filter = resolveInventoryFilter(filterOptions)
+  const { clause, params } = buildInventoryWhere(filter)
   const safeOffset = Math.max(0, Number(offset) || 0)
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 10000))
   const { rows } = await query(
@@ -851,14 +901,16 @@ async function getPrintedCardsForPeriod(period, { offset = 0, limit = 10000 } = 
      FROM cards c
      INNER JOIN batches b ON b.id = c.batch_id
      LEFT JOIN categories cat ON cat.id = b.category_id
-     WHERE ${periodSqlWhere(normalized)}
+     WHERE ${clause}
      ORDER BY b.printed_at DESC, c.id DESC
-     LIMIT ${safeLimit} OFFSET ${safeOffset}`
+     LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+    params
   )
-  const countMeta = await countPrintedCardsForPeriod(normalized)
+  const countMeta = await countPrintedCardsForPeriod(filterOptions)
   return {
     rows,
-    period: normalized,
+    period: filter.period,
+    periodLabel: filter.periodLabel,
     truncated: countMeta.truncated,
     total: countMeta.total,
     offset: safeOffset,
@@ -1184,13 +1236,18 @@ function buildMissingInventoryCard(dbRow) {
 }
 
 export async function getCombinedInventory(options = {}) {
-  const period = normalizeInventoryPeriod(options.period)
+  const filterOptions = {
+    period: options.period,
+    date: options.date,
+    month: options.month,
+  }
   const offset = Math.max(0, Number(options.offset) || 0)
   const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
   const dbOnly = options.dbOnly === true || options.dbOnly === '1'
 
-  const { rows: dbRows, truncated, total, period: normalizedPeriod } = await getPrintedCardsForPeriod(
-    period,
+  const filter = resolveInventoryFilter(filterOptions)
+  const { rows: dbRows, truncated, total } = await getPrintedCardsForPeriod(
+    filterOptions,
     { offset, limit: limit > 10000 ? 10000 : limit }
   )
 
@@ -1204,8 +1261,8 @@ export async function getCombinedInventory(options = {}) {
     return {
       cards: [],
       summary: computeInventorySummary([]),
-      period: normalizedPeriod,
-      periodLabel: periodLabelAr(normalizedPeriod),
+      period: filter.period,
+      periodLabel: filter.periodLabel,
       truncated: Boolean(truncated),
       progress: progressBase,
       dbOnly,
@@ -1221,8 +1278,8 @@ export async function getCombinedInventory(options = {}) {
     return {
       cards,
       summary: computeInventorySummary(cards),
-      period: normalizedPeriod,
-      periodLabel: periodLabelAr(normalizedPeriod),
+      period: filter.period,
+      periodLabel: filter.periodLabel,
       truncated: Boolean(truncated),
       progress: {
         loaded,
@@ -1244,8 +1301,8 @@ export async function getCombinedInventory(options = {}) {
     return {
       cards: enriched.cards,
       summary: computeInventorySummary(enriched.cards),
-      period: normalizedPeriod,
-      periodLabel: periodLabelAr(normalizedPeriod),
+      period: filter.period,
+      periodLabel: filter.periodLabel,
       truncated: Boolean(truncated),
       progress: { loaded, total: total || loaded, percent },
       dbOnly: false,
