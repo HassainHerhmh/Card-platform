@@ -66,28 +66,67 @@ export async function getAgentProfile(agentId) {
   }
 }
 
+function extractCardCode(description) {
+  if (!description) return null
+  const match = String(description).match(/كود\s+(\S+)/)
+  return match ? match[1] : null
+}
+
 export async function getAgentTransactions(agentId, limit = 20) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100)
   const { rows } = await query(
-    `SELECT id, \`date\`, \`type\`, cards, amount, balance
-     FROM ledger
-     WHERE agent_id = $1
-     ORDER BY \`date\` DESC, id DESC
-     LIMIT ${Math.min(Math.max(Number(limit) || 20, 1), 100)}`,
+    `SELECT l.id, l.\`date\`, l.\`type\`, l.cards, l.amount, l.balance, l.description, l.reference_id,
+            (SELECT code FROM cards WHERE batch_id = l.reference_id ORDER BY id LIMIT 1) AS batchSampleCode,
+            (SELECT sq.status FROM sms_queue sq
+             WHERE sq.agent_id = l.agent_id
+               AND l.\`type\` = 'بيع'
+               AND l.description LIKE CONCAT('%كود ', SUBSTRING_INDEX(l.description, 'كود ', -1), '%')
+             ORDER BY sq.id DESC LIMIT 1) AS smsStatus
+     FROM ledger l
+     WHERE l.agent_id = $1
+     ORDER BY l.\`date\` DESC, l.id DESC
+     LIMIT ${safeLimit}`,
     [agentId]
   )
 
   return rows.map((row) => {
     const amount = Number(row.amount)
     const isSale = row.type === 'بيع'
+    const cardCode = extractCardCode(row.description) || row.batchSampleCode || null
+
+    let statusType = 'pending'
+    let status = '—'
+    let statusNote = ''
+
+    if (isSale) {
+      if (row.smsStatus === 'pending') {
+        statusType = 'pending'
+        status = 'انتظار'
+        statusNote = 'تم ارسال SMS'
+      } else if (row.smsStatus === 'failed') {
+        statusType = 'failed'
+        status = 'فشل'
+        statusNote = 'لم تُرسل الرسالة'
+      } else {
+        statusType = 'done'
+        status = 'مكتمل'
+        statusNote = 'تم التأكيد'
+      }
+    } else if (row.type === 'تسليم كروت') {
+      statusType = 'delivery'
+      status = 'تسليم'
+      statusNote = 'دفعة كروت'
+    }
+
     return {
       id: row.id,
       type: isSale ? 'تعبئة رصيد' : row.type,
-      cardNumber: isSale ? `${String(row.id).padStart(3, '0')}000000` : '---',
+      cardNumber: cardCode,
       amount: Math.abs(amount),
       date: formatDate(row.date),
-      status: isSale ? 'مكتمل' : '—',
-      statusNote: isSale ? 'تم التأكيد' : '',
-      statusType: isSale ? 'done' : 'pending',
+      status,
+      statusNote,
+      statusType,
     }
   })
 }
