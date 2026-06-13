@@ -886,7 +886,129 @@ async function countPrintedCardsForPeriod(filterOptions = {}) {
 }
 
 export async function getInventoryCount(filterOptions = {}) {
+  const filter = resolveInventoryFilter(filterOptions)
+  if (filter.type === 'all') {
+    const status = await getRouterStatus()
+    const routerTotal = status.connected
+      ? Number(status.totalCards ?? (status.hotspotUsers || 0) + (status.userManagerUsers || 0)) || 0
+      : 0
+    const cap = 10000
+    return {
+      total: Math.min(routerTotal, cap),
+      dbTotal: 0,
+      routerTotal,
+      truncated: routerTotal > cap,
+      period: filter.period,
+      periodLabel: filter.periodLabel,
+      routerSource: true,
+    }
+  }
   return countPrintedCardsForPeriod(filterOptions)
+}
+
+let routerInventoryCache = null
+let routerInventoryCacheAt = 0
+const ROUTER_INVENTORY_CACHE_MS = 120_000
+
+async function buildRouterInventorySnapshot(api) {
+  const [hotspotUsersRaw, activeHotspotSessions] = await Promise.all([
+    api.write('/ip/hotspot/user/print'),
+    api.write('/ip/hotspot/active/print').catch(() => []),
+  ])
+
+  const activeHotspotUsernames = new Set(
+    (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
+  )
+
+  const hotspotCards = (hotspotUsersRaw || []).map((u) => {
+    const row = mapHotspotUserRow(u)
+    return buildHotspotInventoryCard(row, activeHotspotUsernames, activeHotspotSessions || [])
+  })
+
+  let umCards = []
+  let userManagerMeta = {
+    available: false,
+    customers: [],
+    defaultCustomer: null,
+    profiles: 0,
+  }
+
+  try {
+    const um = await fetchUserManagerSnapshot(api)
+    const activeUmUsernames = new Set(
+      um.sessions.map((s) => s.user || s.username).filter(Boolean)
+    )
+    umCards = um.users.map((row) =>
+      buildUserManagerInventoryCard(row, activeUmUsernames, um.sessions)
+    )
+    userManagerMeta = {
+      available: true,
+      customers: um.customers.map((c) => ({
+        login: customerLogin(c),
+        name: c.name,
+      })),
+      defaultCustomer: um.defaultCustomer,
+      profiles: um.profiles.length,
+    }
+  } catch (error) {
+    if (!isUserManagerUnavailable(error)) throw error
+  }
+
+  const cards = [...hotspotCards, ...umCards]
+  cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  return {
+    cards,
+    summary: computeInventorySummary(cards),
+    sources: {
+      hotspot: hotspotCards.length > 0 || umCards.length === 0,
+      userManager: userManagerMeta.available,
+    },
+    userManager: userManagerMeta,
+    fetchedAt: new Date().toISOString(),
+  }
+}
+
+async function getCachedRouterInventory() {
+  const now = Date.now()
+  if (routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
+    return routerInventoryCache
+  }
+
+  const snapshot = await withConnection((api) => buildRouterInventorySnapshot(api))
+  routerInventoryCache = snapshot
+  routerInventoryCacheAt = now
+  return snapshot
+}
+
+async function getRouterInventoryChunk({ filter, offset, limit }) {
+  const snapshot = await getCachedRouterInventory()
+  const cap = 10000
+  const routerTotal = snapshot.cards.length
+  const total = Math.min(routerTotal, cap)
+  const truncated = routerTotal > cap
+  const safeOffset = Math.max(0, Number(offset) || 0)
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50))
+  const slice = snapshot.cards.slice(safeOffset, safeOffset + safeLimit)
+  const loaded = Math.min(safeOffset + slice.length, total)
+
+  return {
+    cards: slice,
+    summary: snapshot.summary,
+    period: filter.period,
+    periodLabel: filter.periodLabel,
+    truncated,
+    progress: {
+      loaded,
+      total,
+      percent: total ? Math.min(100, Math.round((loaded / total) * 100)) : 100,
+    },
+    dbOnly: false,
+    routerSource: true,
+    sources: snapshot.sources,
+    userManager: snapshot.userManager,
+    fetchedAt: snapshot.fetchedAt,
+  }
 }
 
 async function getPrintedCardsForPeriod(filterOptions = {}, { offset = 0, limit = 10000 } = {}) {
@@ -1246,6 +1368,10 @@ export async function getCombinedInventory(options = {}) {
   const dbOnly = options.dbOnly === true || options.dbOnly === '1'
 
   const filter = resolveInventoryFilter(filterOptions)
+  if (filter.type === 'all') {
+    return getRouterInventoryChunk({ filter, offset, limit, dbOnly })
+  }
+
   const { rows: dbRows, truncated, total } = await getPrintedCardsForPeriod(
     filterOptions,
     { offset, limit: limit > 10000 ? 10000 : limit }
