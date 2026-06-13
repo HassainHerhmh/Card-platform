@@ -35,6 +35,8 @@ export async function migrate() {
     'ALTER TABLE categories ADD COLUMN router_profile VARCHAR(255) NULL',
     "ALTER TABLE categories ADD COLUMN router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'",
     "ALTER TABLE batches ADD COLUMN router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'",
+    'ALTER TABLE categories ADD COLUMN duration_hours INT NOT NULL DEFAULT 24',
+    'ALTER TABLE categories ADD COLUMN duration_minutes INT NOT NULL DEFAULT 0',
   ]
 
   for (const patch of patches) {

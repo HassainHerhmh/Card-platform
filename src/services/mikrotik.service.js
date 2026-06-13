@@ -7,6 +7,7 @@ import {
   routerSourceLabel,
   routerSourceLabelAr,
 } from '../constants/routerSource.js'
+import { formatDurationLabel, parseTimeHms, parseValidityPeriod } from '../utils/duration.js'
 
 function getConnectionConfig() {
   let host = env.mikrotik.host.trim()
@@ -212,12 +213,16 @@ export async function getHotspotProfiles() {
   })
 }
 
-function profileDuration(profile) {
-  if (profile.sessionTimeout) return profile.sessionTimeout
-  if (profile.sharedUsers && profile.sharedUsers !== '1') {
-    return `${profile.sharedUsers} مستخدم مشترك`
+function profileDurationParts(profile) {
+  const session = parseTimeHms(profile.sessionTimeout)
+  if (session) {
+    return {
+      durationHours: session.hours,
+      durationMinutes: session.minutes,
+      duration: formatDurationLabel(session.hours, session.minutes),
+    }
   }
-  return '24 ساعة'
+  return { durationHours: 24, durationMinutes: 0, duration: '24 ساعة' }
 }
 
 function profileDataQuota(profile) {
@@ -351,23 +356,25 @@ function pickDefaultUserManagerCustomer(customers, users = []) {
 }
 
 async function fetchUserManagerSnapshot(api) {
-  const [customersRaw, usersRaw, profilesRaw, sessionsRaw] = await Promise.all([
+  const [customersRaw, usersRaw, profilesRaw, sessionsRaw, limitationsRaw] = await Promise.all([
     api.write('/tool/user-manager/customer/print').catch(() => []),
     api.write('/tool/user-manager/user/print').catch(() => []),
     api.write('/tool/user-manager/profile/print').catch(() => []),
     api.write('/tool/user-manager/session/print').catch(() => []),
+    api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
   ])
+
+  const limitsByProfile = {}
+  for (const lim of limitationsRaw || []) {
+    const profileName = lim.profile
+    if (profileName && !limitsByProfile[profileName]) {
+      limitsByProfile[profileName] = lim
+    }
+  }
 
   const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
   const users = (usersRaw || []).map(mapUserManagerUserRow)
-  const profiles = (profilesRaw || []).map((p) => ({
-    id: p['.id'],
-    name: p.name,
-    validity: p.validity || '',
-    price: p.price || '',
-    owner: p.owner || '',
-    nameForUsers: p['name-for-users'] || '',
-  }))
+  const profiles = (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
   const defaultCustomer = pickDefaultUserManagerCustomer(customers, users)
 
   return {
@@ -376,6 +383,19 @@ async function fetchUserManagerSnapshot(api) {
     profiles,
     sessions: sessionsRaw || [],
     defaultCustomer,
+  }
+}
+
+function mapUserManagerProfileRow(p, limitation) {
+  return {
+    id: p['.id'],
+    name: p.name,
+    validity: p.validity || '',
+    price: p.price ?? '',
+    owner: p.owner || '',
+    nameForUsers: p['name-for-users'] || '',
+    uptimeLimit: limitation?.['uptime-limit'] || p['uptime-limit'] || '',
+    downloadLimit: limitation?.['download-limit'] || p['download-limit'] || '',
   }
 }
 
@@ -406,24 +426,39 @@ async function resolveUserManagerCustomer(api, explicitCustomer) {
 
 export async function getUserManagerProfiles() {
   return withConnection(async (api) => {
-    const profiles = await api.write('/tool/user-manager/profile/print')
-    return (profiles || []).map((p) => ({
-      id: p['.id'],
-      name: p.name,
-      validity: p.validity || '',
-      price: p.price || '',
-      owner: p.owner || '',
-      nameForUsers: p['name-for-users'] || '',
-    }))
+    const [profilesRaw, limitationsRaw] = await Promise.all([
+      api.write('/tool/user-manager/profile/print'),
+      api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
+    ])
+    const limitsByProfile = {}
+    for (const lim of limitationsRaw || []) {
+      if (lim.profile && !limitsByProfile[lim.profile]) limitsByProfile[lim.profile] = lim
+    }
+    return (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
   })
 }
 
-function umProfileDuration(profile) {
-  return profile.validity || '24 ساعة'
+function umProfileDurationParts(profile) {
+  const validity = parseValidityPeriod(profile.validity)
+  const uptime = parseTimeHms(profile.uptimeLimit)
+  const hours = validity.hours || uptime?.hours || 24
+  const minutes = validity.hours ? validity.minutes : (uptime?.minutes || 0)
+  return {
+    durationHours: hours,
+    durationMinutes: minutes,
+    duration: formatDurationLabel(hours, minutes),
+  }
 }
 
 function umProfileDataQuota(profile) {
-  return profile.nameForUsers || profile.price || '1 جيجا'
+  if (profile.downloadLimit) return profile.downloadLimit
+  if (profile.nameForUsers) return profile.nameForUsers
+  return '1 جيجا'
+}
+
+function umProfilePrice(profile) {
+  const price = Number(String(profile.price ?? '').replace(/[^\d.]/g, ''))
+  return Number.isFinite(price) ? price : 0
 }
 
 export async function getUserManagerUsers() {
@@ -651,8 +686,15 @@ async function deleteStaleRouterCategories(profileNames, source = ROUTER_SOURCE.
   return deleted
 }
 
-async function upsertCategoryFromProfile({ name, duration, dataQuota, source }) {
+async function upsertCategoryFromProfile({
+  name, duration, durationHours, durationMinutes, dataQuota, source, price,
+}) {
   const normalizedSource = normalizeRouterSource(source)
+  const durHours = durationHours ?? 24
+  const durMinutes = durationMinutes ?? 0
+  const durLabel = duration || formatDurationLabel(durHours, durMinutes)
+  const categoryPrice = Number(price) || 0
+
   const { rows } = await query(
     'SELECT id FROM categories WHERE router_profile = $1 AND router_source = $2 LIMIT 1',
     [name, normalizedSource]
@@ -661,19 +703,54 @@ async function upsertCategoryFromProfile({ name, duration, dataQuota, source }) 
   if (rows[0]) {
     await query(
       `UPDATE categories
-       SET name = $1, duration = $2, data_quota = $3, router_profile = $4, router_source = $5
-       WHERE id = $6`,
-      [name, duration, dataQuota, name, normalizedSource, rows[0].id]
+       SET name = $1, price = $2, duration = $3, duration_hours = $4, duration_minutes = $5,
+           data_quota = $6, router_profile = $7, router_source = $8
+       WHERE id = $9`,
+      [name, categoryPrice, durLabel, durHours, durMinutes, dataQuota, name, normalizedSource, rows[0].id]
     )
     return { action: 'updated', name, source: normalizedSource }
   }
 
   await query(
-    `INSERT INTO categories (name, price, duration, data_quota, router_profile, router_source)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [name, 0, duration, dataQuota, name, normalizedSource]
+    `INSERT INTO categories
+      (name, price, duration, duration_hours, duration_minutes, data_quota, router_profile, router_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [name, categoryPrice, durLabel, durHours, durMinutes, dataQuota, name, normalizedSource]
   )
   return { action: 'created', name, source: normalizedSource }
+}
+
+async function fixMislabeledUserManagerCategories(umProfileNames) {
+  if (!umProfileNames.length) return 0
+
+  const placeholders = umProfileNames.map((_, i) => `$${i + 1}`).join(', ')
+  const { affectedRows } = await query(
+    `UPDATE categories SET router_source = 'user-manager'
+     WHERE router_source = 'hotspot' AND router_profile IN (${placeholders})`,
+    umProfileNames
+  )
+  return affectedRows || 0
+}
+
+async function deleteDuplicateHotspotCategories(umProfileNames) {
+  if (!umProfileNames.length) return 0
+
+  let deleted = 0
+  for (const name of umProfileNames) {
+    const { rows } = await query(
+      `SELECT c.id FROM categories c
+       INNER JOIN categories um ON um.router_profile = c.router_profile
+         AND um.router_source = 'user-manager'
+       LEFT JOIN batches b ON b.category_id = c.id
+       WHERE c.router_profile = $1 AND c.router_source = 'hotspot' AND b.id IS NULL`,
+      [name]
+    )
+    for (const row of rows) {
+      await query('DELETE FROM categories WHERE id = $1', [row.id])
+      deleted += 1
+    }
+  }
+  return deleted
 }
 
 export async function syncAllFromRouter() {
@@ -701,30 +778,44 @@ export async function syncAllFromRouter() {
   }
 
   const deletedManual = await deleteManualCategories()
-  const profileNames = profiles.map((p) => p.name)
   const umProfileNames = umProfiles.map((p) => p.name)
-  const deletedStaleHotspot = await deleteStaleRouterCategories(profileNames, ROUTER_SOURCE.HOTSPOT)
+  const umNameSet = new Set(umProfileNames)
+  const relabeled = userManagerAvailable
+    ? await fixMislabeledUserManagerCategories(umProfileNames)
+    : 0
+  const deletedDupHotspot = userManagerAvailable
+    ? await deleteDuplicateHotspotCategories(umProfileNames)
+    : 0
+  const deletedStaleHotspot = await deleteStaleRouterCategories(
+    profiles.filter((p) => !umNameSet.has(p.name)).map((p) => p.name),
+    ROUTER_SOURCE.HOTSPOT
+  )
   const deletedStaleUm = userManagerAvailable
     ? await deleteStaleRouterCategories(umProfileNames, ROUTER_SOURCE.USER_MANAGER)
     : 0
 
   const categoryResults = []
   for (const profile of profiles) {
+    if (umNameSet.has(profile.name)) continue
+    const dur = profileDurationParts(profile)
     categoryResults.push(await upsertCategoryFromProfile({
       name: profile.name,
-      duration: profileDuration(profile),
+      ...dur,
       dataQuota: profileDataQuota(profile),
       source: ROUTER_SOURCE.HOTSPOT,
+      price: 0,
     }))
   }
 
   if (userManagerAvailable) {
     for (const profile of umProfiles) {
+      const dur = umProfileDurationParts(profile)
       categoryResults.push(await upsertCategoryFromProfile({
         name: profile.name,
-        duration: umProfileDuration(profile),
+        ...dur,
         dataQuota: umProfileDataQuota(profile),
         source: ROUTER_SOURCE.USER_MANAGER,
+        price: umProfilePrice(profile),
       }))
     }
   }
@@ -750,7 +841,8 @@ export async function syncAllFromRouter() {
     categories: {
       synced: categoryResults.length,
       deletedManual,
-      deletedStale: deletedStaleHotspot + deletedStaleUm,
+      deletedStale: deletedStaleHotspot + deletedStaleUm + deletedDupHotspot,
+      relabeled,
       profiles: categoryResults,
     },
     cardSettings,

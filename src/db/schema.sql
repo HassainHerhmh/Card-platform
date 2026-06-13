@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS categories (
   duration VARCHAR(100) NOT NULL,
   data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا',
   router_profile VARCHAR(255) NULL,
-  router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'
+  router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot',
+  duration_hours INT NOT NULL DEFAULT 24,
+  duration_minutes INT NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS agents (
