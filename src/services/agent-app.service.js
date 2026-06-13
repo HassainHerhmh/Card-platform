@@ -138,7 +138,7 @@ export async function getAgentTransactions(agentId, limit = 20) {
 
     return {
       id: row.id,
-      type: isSale ? 'تعبئة رصيد' : row.type,
+      type: isSale ? 'شحن كرت' : row.type,
       cardNumber: cardCode,
       amount: Math.abs(amount),
       date: formatDate(row.date),
