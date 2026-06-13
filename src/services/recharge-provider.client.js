@@ -1,6 +1,16 @@
 const BALANCE_ACTIONS = ['balance', 'Balance', 'querybalance', 'getbalance']
 const REQUEST_TIMEOUT_MS = 20000
 
+const HTTP_STATUS_MESSAGES = {
+  400: 'طلب غير صالح من المزود',
+  401: 'بيانات الدخول غير صحيحة',
+  403: 'مرفوض من المزود — تحقق من IP أو بيانات الربط',
+  404: 'رابط المزود غير صحيح',
+  500: 'خطأ في سيرفر المزود',
+  502: 'السيرفر الوسيط لا يستجيب',
+  503: 'المزود غير متاح حالياً',
+}
+
 function normalizeBaseUrl(apiUrl) {
   const trimmed = String(apiUrl || '').trim()
   if (!trimmed) return ''
@@ -31,10 +41,39 @@ function extractNumber(value) {
   return Number.isFinite(num) ? num : null
 }
 
-function parseBalanceResponse(text) {
+function isHttpStatusBody(text) {
+  const trimmed = String(text || '').trim()
+  return /^(?:40[0-9]|50[0-9])$/.test(trimmed)
+}
+
+function httpStatusError(status, text) {
+  const base = HTTP_STATUS_MESSAGES[status] || `خطأ HTTP ${status} من المزود`
+  const body = String(text || '').trim()
+  if (body && body !== String(status) && !isHttpStatusBody(body)) {
+    return { ok: false, error: `${base}: ${body.slice(0, 120)}`, connectionIssue: true, httpStatus: status }
+  }
+  return { ok: false, error: base, connectionIssue: true, httpStatus: status }
+}
+
+function isPlausibleBalance(num, rawText) {
+  const trimmed = String(rawText || '').trim()
+  if (isHttpStatusBody(trimmed)) return false
+  if (Number.isInteger(num) && num >= 400 && num <= 599 && trimmed === String(num)) return false
+  return true
+}
+
+function parseBalanceResponse(text, httpStatus) {
+  if (httpStatus >= 400) {
+    return httpStatusError(httpStatus, text)
+  }
+
   const trimmed = String(text || '').trim()
   if (!trimmed) {
     return { ok: false, error: 'استجابة فارغة من المزود', connectionIssue: true }
+  }
+
+  if (isHttpStatusBody(trimmed)) {
+    return httpStatusError(Number(trimmed), trimmed)
   }
 
   try {
@@ -55,10 +94,15 @@ function parseBalanceResponse(text) {
     for (const key of balanceKeys) {
       if (json[key] != null) {
         const num = extractNumber(json[key])
-        if (num !== null) {
+        if (num !== null && isPlausibleBalance(num, json[key])) {
           return { ok: true, balance: num, raw: trimmed }
         }
       }
+    }
+
+    const code = Number(json.code ?? json.statusCode ?? json.httpStatus)
+    if (code >= 400 && code <= 599) {
+      return httpStatusError(code, errorText || trimmed)
     }
 
     if (errorText && /error|fail|invalid|wrong|unauthorized|خطأ|فشل/i.test(String(errorText))) {
@@ -83,7 +127,7 @@ function parseBalanceResponse(text) {
   }
 
   const num = extractNumber(trimmed)
-  if (num !== null) {
+  if (num !== null && isPlausibleBalance(num, trimmed)) {
     return { ok: true, balance: num, raw: trimmed }
   }
 
@@ -129,7 +173,13 @@ export async function queryProviderBalance(provider) {
     try {
       const url = buildBalanceRequest(provider, action)
       const { text, status } = await fetchBalanceUrl(url)
-      const parsed = parseBalanceResponse(text)
+
+      if (status >= 400) {
+        lastError = httpStatusError(status, text)
+        continue
+      }
+
+      const parsed = parseBalanceResponse(text, status)
 
       if (parsed.ok) {
         return {
