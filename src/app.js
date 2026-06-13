@@ -13,6 +13,7 @@ import mikrotikRoutes from './routes/mikrotik.routes.js'
 import errorsRoutes from './routes/errors.routes.js'
 import agentAuthRoutes from './routes/agent-auth.routes.js'
 import agentAppRoutes from './routes/agent-app.routes.js'
+import smsGatewayRoutes from './routes/sms-gateway.routes.js'
 
 const app = express()
 
@@ -66,6 +67,7 @@ app.get('/api/health', async (_req, res) => {
 app.use('/api/auth', authRoutes)
 app.use('/api/agent-auth', agentAuthRoutes)
 app.use('/api/agent-app', agentAppRoutes)
+app.use('/api/sms-gateway', smsGatewayRoutes)
 app.use('/api/users', usersRoutes)
 app.use('/api/settings', settingsRoutes)
 app.use('/api/agents', agentsRoutes)

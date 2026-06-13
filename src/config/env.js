@@ -30,6 +30,7 @@ export const env = {
   port: Number(process.env.PORT) || 3001,
   nodeEnv: process.env.NODE_ENV || 'development',
   jwtSecret: process.env.JWT_SECRET || 'dev-only-secret-change-me',
+  smsGatewayToken: process.env.SMS_GATEWAY_TOKEN || '',
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   databaseUrl: buildDatabaseUrl(),
   mikrotik: {

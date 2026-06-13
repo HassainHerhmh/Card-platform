@@ -59,5 +59,23 @@ export async function migrate() {
     )
   `)
 
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS sms_queue (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      recipient_phone VARCHAR(20) NOT NULL,
+      message TEXT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      agent_id INT,
+      card_id INT,
+      category_name VARCHAR(255),
+      network_name VARCHAR(255),
+      error_message VARCHAR(500),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      sent_at TIMESTAMP NULL,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE SET NULL,
+      INDEX idx_sms_queue_status (status)
+    )
+  `)
+
   console.log('Database schema ready')
 }

@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requireAgentAuth } from '../middleware/agentAuth.js'
 import * as agentAppService from '../services/agent-app.service.js'
+import * as smsGatewayService from '../services/sms-gateway.service.js'
 
 const router = Router()
 router.use(requireAgentAuth)
@@ -56,6 +57,26 @@ router.get('/transactions', async (req, res) => {
   } catch (error) {
     console.error(error)
     res.status(500).json({ message: 'تعذر جلب العمليات' })
+  }
+})
+
+router.post('/charge', async (req, res) => {
+  try {
+    const { categoryId, networkId, recipientPhone, sendSms } = req.body
+    if (!categoryId || !recipientPhone) {
+      return res.status(400).json({ message: 'الفئة ورقم المستلم مطلوبان' })
+    }
+    const result = await smsGatewayService.processAgentCharge({
+      agentId: req.agent.id,
+      categoryId: +categoryId,
+      networkId: networkId ? +networkId : null,
+      recipientPhone,
+      sendSms: Boolean(sendSms),
+    })
+    res.json({ charge: result })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ message: error.message || 'تعذر تنفيذ الشحن' })
   }
 })
 
