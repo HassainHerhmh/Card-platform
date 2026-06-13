@@ -872,7 +872,7 @@ export async function syncAllFromRouter() {
     totalCards,
     userManagerAvailable,
     userManager: {
-      available: userManagerAvailable && umProfiles.length + umUsers.length + umCustomers.length > 0,
+      available: userManagerAvailable && umProfiles.length + umUsersCount + umCustomers.length > 0,
       customers: umCustomers.map((c) => ({
         login: customerLogin(c),
         name: c.name,
