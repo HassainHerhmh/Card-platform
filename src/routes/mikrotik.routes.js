@@ -7,6 +7,7 @@ import {
   getHotspotUsers,
   getCombinedInventory,
   getUserManagerProfiles,
+  getUserManagerCustomers,
   syncRouterCardsCount,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
@@ -105,6 +106,16 @@ router.get('/user-manager/profiles', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب بروفايلات User Manager' })
+  }
+})
+
+router.get('/user-manager/customers', async (_req, res) => {
+  try {
+    const data = await getUserManagerCustomers()
+    res.json(data)
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر جلب عملاء User Manager من الراوتر' })
   }
 })
 

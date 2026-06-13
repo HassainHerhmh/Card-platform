@@ -105,6 +105,13 @@ export async function getRouterStatus() {
       let activeHotspotUsers = 0
       let userManagerUsers = 0
       let activeUserManagerSessions = 0
+      let userManager = {
+        available: false,
+        customers: [],
+        defaultCustomer: null,
+        profiles: 0,
+      }
+
       try {
         const users = await api.write('/ip/hotspot/user/print')
         hotspotUsers = Array.isArray(users) ? users.length : 0
@@ -118,15 +125,20 @@ export async function getRouterStatus() {
         activeHotspotUsers = 0
       }
       try {
-        const umUsers = await api.write('/tool/user-manager/user/print')
-        userManagerUsers = Array.isArray(umUsers) ? umUsers.length : 0
+        const um = await fetchUserManagerSnapshot(api)
+        userManagerUsers = um.users.length
+        activeUserManagerSessions = um.sessions.length
+        userManager = {
+          available: true,
+          customers: um.customers.map((c) => ({
+            login: customerLogin(c),
+            name: c.name,
+          })),
+          defaultCustomer: um.defaultCustomer,
+          profiles: um.profiles.length,
+        }
       } catch {
         userManagerUsers = 0
-      }
-      try {
-        const umSessions = await api.write('/tool/user-manager/session/print')
-        activeUserManagerSessions = Array.isArray(umSessions) ? umSessions.length : 0
-      } catch {
         activeUserManagerSessions = 0
       }
 
@@ -146,6 +158,7 @@ export async function getRouterStatus() {
         activeHotspotUsers,
         userManagerUsers,
         activeUserManagerSessions,
+        userManager,
         totalCards: hotspotUsers + userManagerUsers,
         cpuLoad: resource['cpu-load'] ?? null,
         message: `متصل — ${identity.name || connection.host}`,
@@ -283,6 +296,92 @@ function isUserManagerUnavailable(error) {
   return /no such command|bad command|cannot find|not implemented|user manager is not/i.test(msg)
 }
 
+function mapUserManagerCustomerRow(c) {
+  return {
+    id: c['.id'],
+    login: c.login || '',
+    name: c.name || c.login || '',
+    disabled: c.disabled === 'true',
+  }
+}
+
+function customerLogin(customer) {
+  return customer.login || customer.name || ''
+}
+
+function pickDefaultUserManagerCustomer(customers, users = []) {
+  if (!customers.length) return null
+
+  if (users.length) {
+    const counts = {}
+    for (const user of users) {
+      const key = user.customer
+      if (key) counts[key] = (counts[key] || 0) + 1
+    }
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]
+    if (top?.[0]) return top[0]
+  }
+
+  const admin = customers.find((c) => customerLogin(c).toLowerCase() === 'admin')
+  if (admin) return customerLogin(admin)
+
+  return customerLogin(customers[0])
+}
+
+async function fetchUserManagerSnapshot(api) {
+  const [customersRaw, usersRaw, profilesRaw, sessionsRaw] = await Promise.all([
+    api.write('/tool/user-manager/customer/print').catch(() => []),
+    api.write('/tool/user-manager/user/print').catch(() => []),
+    api.write('/tool/user-manager/profile/print').catch(() => []),
+    api.write('/tool/user-manager/session/print').catch(() => []),
+  ])
+
+  const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
+  const users = (usersRaw || []).map(mapUserManagerUserRow)
+  const profiles = (profilesRaw || []).map((p) => ({
+    id: p['.id'],
+    name: p.name,
+    validity: p.validity || '',
+    price: p.price || '',
+    owner: p.owner || '',
+    nameForUsers: p['name-for-users'] || '',
+  }))
+  const defaultCustomer = pickDefaultUserManagerCustomer(customers, users)
+
+  return {
+    customers,
+    users,
+    profiles,
+    sessions: sessionsRaw || [],
+    defaultCustomer,
+  }
+}
+
+export async function fetchUserManagerFromRouter() {
+  return withConnection(async (api) => fetchUserManagerSnapshot(api))
+}
+
+export async function getUserManagerCustomers() {
+  const snapshot = await fetchUserManagerFromRouter()
+  return {
+    customers: snapshot.customers,
+    defaultCustomer: snapshot.defaultCustomer,
+  }
+}
+
+async function resolveUserManagerCustomer(api, explicitCustomer) {
+  if (explicitCustomer) return explicitCustomer
+  if (env.mikrotik.userManagerCustomerOverride) {
+    return env.mikrotik.userManagerCustomerOverride
+  }
+
+  const snapshot = await fetchUserManagerSnapshot(api)
+  if (!snapshot.defaultCustomer) {
+    throw new Error('لا يوجد عميل User Manager على الراوتر — فعّل User Manager أو أضف customer')
+  }
+  return snapshot.defaultCustomer
+}
+
 export async function getUserManagerProfiles() {
   return withConnection(async (api) => {
     const profiles = await api.write('/tool/user-manager/profile/print')
@@ -337,19 +436,15 @@ function hasUserManagerUsage(user) {
 
 export async function getUserManagerInventory() {
   return withConnection(async (api) => {
-    const [users, sessions] = await Promise.all([
-      api.write('/tool/user-manager/user/print'),
-      api.write('/tool/user-manager/session/print').catch(() => []),
-    ])
+    const um = await fetchUserManagerSnapshot(api)
 
     const activeUsernames = new Set(
-      (sessions || []).map((s) => s.user || s.username).filter(Boolean)
+      um.sessions.map((s) => s.user || s.username).filter(Boolean)
     )
 
-    const cards = (users || []).map((u) => {
-      const row = mapUserManagerUserRow(u)
+    const cards = um.users.map((row) => {
       const { status, label } = resolveCardStatus(row, activeUsernames, hasUserManagerUsage)
-      const activeSession = (sessions || []).find(
+      const activeSession = um.sessions.find(
         (s) => (s.user || s.username) === row.name
       )
       return {
@@ -377,6 +472,15 @@ export async function getUserManagerInventory() {
     return {
       cards,
       summary,
+      userManager: {
+        available: true,
+        customers: um.customers.map((c) => ({
+          login: customerLogin(c),
+          name: c.name,
+        })),
+        defaultCustomer: um.defaultCustomer,
+        profiles: um.profiles.length,
+      },
       fetchedAt: new Date().toISOString(),
     }
   })
@@ -432,6 +536,12 @@ export async function getCombinedInventory() {
     sources: {
       hotspot: Boolean(hotspotResult),
       userManager: userManagerAvailable && Boolean(userManagerResult),
+    },
+    userManager: userManagerResult?.userManager || {
+      available: userManagerAvailable && Boolean(userManagerResult),
+      customers: [],
+      defaultCustomer: null,
+      profiles: 0,
     },
     fetchedAt: new Date().toISOString(),
   }
@@ -552,10 +662,15 @@ export async function syncAllFromRouter() {
 
   let umProfiles = []
   let umUsers = []
+  let umCustomers = []
+  let umDefaultCustomer = null
   let userManagerAvailable = true
   try {
-    umProfiles = await getUserManagerProfiles()
-    umUsers = await getUserManagerUsers()
+    const um = await fetchUserManagerFromRouter()
+    umProfiles = um.profiles
+    umUsers = um.users
+    umCustomers = um.customers
+    umDefaultCustomer = um.defaultCustomer
   } catch (error) {
     userManagerAvailable = !isUserManagerUnavailable(error)
     if (userManagerAvailable) {
@@ -621,6 +736,15 @@ export async function syncAllFromRouter() {
     userManagerUsers: umUsers.length,
     totalCards,
     userManagerAvailable,
+    userManager: {
+      available: userManagerAvailable && umProfiles.length + umUsers.length + umCustomers.length > 0,
+      customers: umCustomers.map((c) => ({
+        login: customerLogin(c),
+        name: c.name,
+      })),
+      defaultCustomer: umDefaultCustomer,
+      profiles: umProfiles.length,
+    },
     usersSample: [
       ...hotspotUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.HOTSPOT })),
       ...umUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.USER_MANAGER })),
@@ -641,12 +765,13 @@ export async function syncCategoriesFromRouter() {
 
 export async function pushUserManagerUsers({ profile, codes, customer }) {
   const profileName = profile
-  const cust = customer || env.mikrotik.userManagerCustomer || 'admin'
   if (!profileName || !codes?.length) {
     throw new Error('بروفايل User Manager والأكواد مطلوبان')
   }
 
   return withConnection(async (api) => {
+    const cust = await resolveUserManagerCustomer(api, customer)
+
     for (const code of codes) {
       let added = false
       for (let attempt = 0; attempt < 5 && !added; attempt += 1) {
@@ -681,7 +806,7 @@ export async function pushUserManagerUsers({ profile, codes, customer }) {
     const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
-    return { added: codes.length, totalOnRouter: liveCount, userManagerTotal: umCount }
+    return { added: codes.length, totalOnRouter: liveCount, userManagerTotal: umCount, customer: cust }
   })
 }
 
