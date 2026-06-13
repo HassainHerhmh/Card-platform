@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS platform_users (
 CREATE TABLE IF NOT EXISTS card_settings (
   id INT PRIMARY KEY DEFAULT 1,
   digits INT NOT NULL DEFAULT 8,
-  chars INT NOT NULL DEFAULT 12,
+  chars INT NOT NULL DEFAULT 2,
   CHECK (id = 1)
 );
 

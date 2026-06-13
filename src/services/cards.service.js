@@ -1,13 +1,8 @@
 import { query } from '../db/pool.js'
 import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
+import { generateCardCode } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
-
-function generateCode(digits) {
-  const min = 10 ** (digits - 1)
-  const max = 10 ** digits - 1
-  return String(Math.floor(min + Math.random() * (max - min + 1)))
-}
 
 async function getBatchCards(batchId) {
   const { rows } = await query(
@@ -62,7 +57,7 @@ export async function createBatch({ categoryId, count, agentId }) {
   const cards = []
 
   for (let i = 0; i < count; i += 1) {
-    const code = generateCode(settings.digits)
+    const code = generateCardCode({ digits: settings.digits, chars: settings.chars })
     const { insertId: cardId } = await query(
       'INSERT INTO cards (batch_id, code, status) VALUES ($1, $2, $3)',
       [batch.id, code, status]
