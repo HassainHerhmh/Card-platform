@@ -379,21 +379,66 @@ async function fetchUserManagerSnapshot(api) {
   }
 }
 
-async function printUserManagerProfileLimitations(api) {
-  const paths = [
-    '/tool/user-manager/profile/profile-limitation/print',
-    '/tool/user-manager/profile-limitation/print',
-    '/tool/user-manager/profile/limitation/print',
-  ]
-  for (const path of paths) {
-    try {
-      const rows = await api.write(path)
-      if (Array.isArray(rows) && rows.length > 0) return rows
-    } catch {
-      // try next path variant for this RouterOS version
+function buildProfileIdMap(profilesRaw) {
+  const idToName = {}
+  for (const p of profilesRaw || []) {
+    if (p.name) idToName[p.name] = p.name
+    if (p['.id']) idToName[p['.id']] = p.name
+  }
+  return idToName
+}
+
+async function probeRouterPath(api, path) {
+  try {
+    const rows = await api.write(path)
+    const list = Array.isArray(rows) ? rows : []
+    return { path, ok: true, count: list.length, rows: list, error: null }
+  } catch (error) {
+    return { path, ok: false, count: 0, rows: [], error: error.message || String(error) }
+  }
+}
+
+async function pickBestRouterPath(api, paths) {
+  const probes = await Promise.all(paths.map((path) => probeRouterPath(api, path)))
+  const viable = probes.filter((p) => p.ok).sort((a, b) => b.count - a.count)
+  return {
+    probes,
+    best: viable[0] || null,
+    rows: viable[0]?.rows || [],
+  }
+}
+
+const UM_PROFILE_LINK_PATHS = [
+  '/tool/user-manager/profile/profile-limitation/print',
+  '/tool/user-manager/profile-limitation/print',
+  '/tool/user-manager/profile/limitation/print',
+]
+
+const UM_LIMITATION_DEF_PATHS = [
+  '/tool/user-manager/limitation/print',
+]
+
+async function fetchUptimeLimitsFromUsers(api, profilesRaw) {
+  const idToName = buildProfileIdMap(profilesRaw)
+  const byProfile = {}
+
+  const userSources = await Promise.all([
+    probeRouterPath(api, '/tool/user-manager/user/print'),
+    probeRouterPath(api, '/tool/user-manager/user-profile/print'),
+  ])
+
+  for (const source of userSources) {
+    for (const row of source.rows) {
+      const profKey = row['actual-profile'] || row.profile
+      const profileName = idToName[profKey] || profKey
+      const uptime = row['uptime-limit']
+      if (profileName && uptime && uptime !== '00:00:00' && !byProfile[profileName]) {
+        byProfile[profileName] = uptime
+      }
     }
   }
-  return []
+
+  return { byProfile, userSources: userSources.map(({ path, ok, count, error }) => ({ path, ok, count, error })) }
 }
 
 function buildLimitationLookup(limitationDefsRaw) {
@@ -425,11 +470,7 @@ function mergeLimitRows(existing, next) {
 
 function resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesRaw) {
   const limitationByKey = buildLimitationLookup(limitationDefsRaw)
-  const idToName = {}
-  for (const p of profilesRaw || []) {
-    if (p.name) idToName[p.name] = p.name
-    if (p['.id']) idToName[p['.id']] = p.name
-  }
+  const idToName = buildProfileIdMap(profilesRaw)
 
   const limitsByProfile = {}
   for (const link of profileLinksRaw || []) {
@@ -443,12 +484,118 @@ function resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesR
   return limitsByProfile
 }
 
-async function fetchUserManagerLimitationData(api, profilesRaw) {
-  const [limitationDefsRaw, profileLinksRaw] = await Promise.all([
-    api.write('/tool/user-manager/limitation/print').catch(() => []),
-    printUserManagerProfileLimitations(api),
+function applyUptimeFallback(limitsByProfile, uptimeByProfile) {
+  for (const [profileName, uptime] of Object.entries(uptimeByProfile || {})) {
+    if (!limitsByProfile[profileName]?.['uptime-limit']) {
+      limitsByProfile[profileName] = mergeLimitRows(limitsByProfile[profileName], {
+        'uptime-limit': uptime,
+      })
+    }
+  }
+  return limitsByProfile
+}
+
+async function fetchUserManagerLimitationBundle(api, profilesRaw) {
+  const [limitationPick, profileLinkPick, userFallback] = await Promise.all([
+    pickBestRouterPath(api, UM_LIMITATION_DEF_PATHS),
+    pickBestRouterPath(api, UM_PROFILE_LINK_PATHS),
+    fetchUptimeLimitsFromUsers(api, profilesRaw),
   ])
-  return resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesRaw)
+
+  let limitsByProfile = resolveProfileLimitations(
+    profileLinkPick.rows,
+    limitationPick.rows,
+    profilesRaw
+  )
+  applyUptimeFallback(limitsByProfile, userFallback.byProfile)
+
+  return {
+    limitsByProfile,
+    limitationPick,
+    profileLinkPick,
+    userFallback,
+  }
+}
+
+async function fetchUserManagerLimitationData(api, profilesRaw) {
+  const bundle = await fetchUserManagerLimitationBundle(api, profilesRaw)
+  return bundle.limitsByProfile
+}
+
+export async function diagnoseUserManagerLimits() {
+  return withConnection(async (api) => {
+    const profilesRaw = await api.write('/tool/user-manager/profile/print').catch((error) => {
+      throw new Error(`تعذر قراءة البروفايلات: ${error.message}`)
+    })
+
+    const bundle = await fetchUserManagerLimitationBundle(api, profilesRaw)
+    const { rows: dbCategories } = await query(
+      `SELECT name, router_profile AS routerProfile, router_source AS routerSource,
+              duration_hours AS durationHours, duration_minutes AS durationMinutes, duration
+       FROM categories WHERE router_source = 'user-manager' ORDER BY id`
+    )
+
+    const profiles = (profilesRaw || []).map((p) => {
+      const limitation = bundle.limitsByProfile[p.name] || {}
+      const mapped = mapUserManagerProfileRow(p, limitation)
+      const parsed = umProfileDurationParts(mapped)
+      const issues = []
+      if (!mapped.uptimeLimit) issues.push('uptime-limit فارغ من الراوتر')
+      if (!parsed.durationHours && !parsed.durationMinutes) issues.push('لم يُحلّل وقت الاستخدام')
+      return {
+        name: mapped.name,
+        validity: mapped.validity,
+        price: mapped.price,
+        uptimeLimitRaw: mapped.uptimeLimit || null,
+        downloadLimitRaw: mapped.downloadLimit || null,
+        durationHours: parsed.durationHours,
+        durationMinutes: parsed.durationMinutes,
+        validityLabel: parsed.duration,
+        issues,
+      }
+    })
+
+    const globalIssues = []
+    if (!bundle.limitationPick.best) {
+      globalIssues.push('فشل جلب جدول limitation — تحقق من صلاحيات API')
+    } else if (bundle.limitationPick.best.count === 0) {
+      globalIssues.push('جدول limitation فارغ على الراوتر')
+    }
+    if (!bundle.profileLinkPick.best) {
+      globalIssues.push('فشل جلب profile-limitation — المسار غير مدعوم أو لا صلاحية')
+    } else if (bundle.profileLinkPick.best.count === 0) {
+      globalIssues.push('لا توجد روابط profile-limitation — الوقت لن يُقرأ من limitation')
+    }
+    if (profiles.every((p) => p.issues.length > 0) && Object.keys(bundle.userFallback.byProfile).length === 0) {
+      globalIssues.push('لا يوجد uptime-limit في limitation ولا في users كبديل')
+    }
+
+    return {
+      ok: profiles.some((p) => !p.issues.length),
+      summary: {
+        profiles: profiles.length,
+        limitations: bundle.limitationPick.best?.count ?? 0,
+        profileLinks: bundle.profileLinkPick.best?.count ?? 0,
+        uptimeFromUsers: Object.keys(bundle.userFallback.byProfile).length,
+        categoriesInDb: dbCategories.length,
+      },
+      globalIssues,
+      apiPaths: {
+        limitations: bundle.limitationPick.probes,
+        profileLinks: bundle.profileLinkPick.probes,
+        users: bundle.userFallback.userSources,
+      },
+      winningPaths: {
+        limitations: bundle.limitationPick.best?.path || null,
+        profileLinks: bundle.profileLinkPick.best?.path || null,
+      },
+      limitationDefsSample: (bundle.limitationPick.rows || []).slice(0, 5),
+      profileLinksSample: (bundle.profileLinkPick.rows || []).slice(0, 5),
+      uptimeFromUsers: bundle.userFallback.byProfile,
+      profiles,
+      dbCategories,
+    }
+  })
 }
 
 function mapUserManagerProfileRow(p, limitation) {

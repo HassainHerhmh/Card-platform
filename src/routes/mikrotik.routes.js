@@ -9,6 +9,7 @@ import {
   getUserManagerProfiles,
   getUserManagerCustomers,
   syncRouterCardsCount,
+  diagnoseUserManagerLimits,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
 
@@ -96,6 +97,20 @@ router.get('/inventory', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب مخزون الكروت من الراوتر' })
+  }
+})
+
+router.get('/user-manager/diagnostics', async (_req, res) => {
+  try {
+    const report = await diagnoseUserManagerLimits()
+    res.json(report)
+  } catch (error) {
+    console.error('[um-diagnostics]', error)
+    res.status(502).json({
+      ok: false,
+      message: error.message || 'تعذر تشخيص وقت User Manager',
+      globalIssues: [error.message || 'خطأ غير معروف'],
+    })
   }
 })
 
