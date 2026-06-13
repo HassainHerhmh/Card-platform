@@ -9,16 +9,21 @@ router.use(requireAuth)
 router.get('/routers', async (_req, res) => {
   try {
     const status = await getRouterStatus()
-    const { rows } = await query('SELECT id, name, ip, cards_printed AS cardsPrinted FROM mikrotik_routers ORDER BY id')
-    const routers = rows.length > 0
-      ? rows.map((r, index) => ({
-          ...r,
-          ip: index === 0 && status.host ? status.host : r.ip,
+    const { rows } = await query(
+      'SELECT id, name, ip, cards_printed AS cardsPrinted FROM mikrotik_routers ORDER BY id LIMIT 1'
+    )
+    const main = rows[0]
+
+    const routers = main
+      ? [{
+          ...main,
+          name: status.identity || main.name,
+          ip: status.host || main.ip,
           status: status.connected ? 'متصل' : 'غير متصل',
-          identity: index === 0 ? status.identity : undefined,
-          version: index === 0 ? status.version : undefined,
-          hotspotUsers: index === 0 ? status.hotspotUsers : undefined,
-        }))
+          version: status.version,
+          boardName: status.boardName,
+          hotspotUsers: status.hotspotUsers,
+        }]
       : status.host
         ? [{
             id: 0,
@@ -26,8 +31,8 @@ router.get('/routers', async (_req, res) => {
             ip: status.host,
             cardsPrinted: 0,
             status: status.connected ? 'متصل' : 'غير متصل',
-            identity: status.identity,
             version: status.version,
+            boardName: status.boardName,
             hotspotUsers: status.hotspotUsers,
           }]
         : []

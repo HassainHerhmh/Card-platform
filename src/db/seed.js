@@ -51,9 +51,7 @@ export async function seed() {
   }
 
   const routers = [
-    ['راوتر الرئيسي', '192.168.88.1', 1250],
-    ['راوتر الفرع الشمالي', '192.168.89.1', 680],
-    ['راوتر الفرع الجنوبي', '192.168.90.1', 420],
+    ['راوتر الرئيسي', 'hslink.pro:7227', 0],
   ]
   for (const [name, ip, cardsPrinted] of routers) {
     await query('INSERT INTO mikrotik_routers (name, ip, cards_printed) VALUES ($1, $2, $3)', [name, ip, cardsPrinted])

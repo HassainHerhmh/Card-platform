@@ -204,4 +204,18 @@ export async function migrate() {
   }
 
   console.log('Database schema ready')
+
+  await pool.execute(`
+    DELETE FROM mikrotik_routers
+    WHERE ip IN ('192.168.89.1', '192.168.90.1')
+       OR name LIKE '%الفرع%'
+  `)
+
+  const [mainRows] = await pool.execute('SELECT MIN(id) AS id FROM mikrotik_routers')
+  if (mainRows[0]?.id) {
+    await pool.execute(
+      'UPDATE mikrotik_routers SET name = ?, ip = ? WHERE id = ?',
+      ['راوتر الرئيسي', 'hslink.pro:7227', mainRows[0].id]
+    )
+  }
 }
