@@ -93,7 +93,7 @@ router.get('/profiles', async (_req, res) => {
 
 router.get('/inventory/count', async (req, res) => {
   try {
-    const period = req.query.period || 'week'
+    const period = req.query.period || 'day'
     const meta = await getInventoryCount(period)
     res.json(meta)
   } catch (error) {
@@ -104,7 +104,7 @@ router.get('/inventory/count', async (req, res) => {
 
 router.get('/inventory', async (req, res) => {
   try {
-    const period = req.query.period || 'week'
+    const period = req.query.period || 'day'
     const offset = req.query.offset != null ? Number(req.query.offset) : 0
     const limit = req.query.limit != null ? Number(req.query.limit) : undefined
     const dbOnly = req.query.dbOnly === '1' || req.query.dbOnly === 'true'

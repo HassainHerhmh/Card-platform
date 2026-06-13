@@ -1,5 +1,6 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
+import { syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
 
 export async function getNetworks() {
   const { rows } = await query(
@@ -28,6 +29,12 @@ export async function getNetworkById(id) {
 }
 
 export async function getCategoriesForAgent(agentId) {
+  try {
+    await syncAgentPendingCardsWithRouter(agentId)
+  } catch (error) {
+    console.warn('[agent-app] router card sync skipped:', error.message)
+  }
+
   const { rows } = await query(
     `SELECT c.id, c.name, c.price, c.duration, c.data_quota AS dataQuota,
             COUNT(CASE WHEN ca.status = 'معلق' THEN 1 END) AS availableCards

@@ -956,6 +956,42 @@ async function enrichDbRowsWithRouterSafe(dbRows) {
   }
 }
 
+async function purgeStaleCardsFromDb(codes) {
+  if (!codes?.length) return 0
+
+  const unique = [...new Set(codes.filter(Boolean))]
+  if (!unique.length) return 0
+
+  const placeholders = unique.map((_, i) => `$${i + 1}`).join(', ')
+  const { rows: batchRows } = await query(
+    `SELECT DISTINCT batch_id AS batchId FROM cards WHERE code IN (${placeholders})`,
+    unique
+  )
+
+  const { affectedRows } = await query(
+    `DELETE FROM cards WHERE code IN (${placeholders})`,
+    unique
+  )
+
+  for (const row of batchRows) {
+    const batchId = row.batchId ?? row.batch_id
+    if (!batchId) continue
+    await query(
+      'UPDATE batches SET `count` = (SELECT COUNT(*) FROM cards WHERE batch_id = $1) WHERE id = $1',
+      [batchId]
+    )
+    const { rows: left } = await query(
+      'SELECT COUNT(*) AS cnt FROM cards WHERE batch_id = $1',
+      [batchId]
+    )
+    if (Number(left[0]?.cnt) === 0) {
+      await query('DELETE FROM batches WHERE id = $1', [batchId])
+    }
+  }
+
+  return affectedRows || unique.length
+}
+
 async function enrichDbRowsWithRouter(dbRows) {
   if (!dbRows.length) {
     return {
@@ -993,26 +1029,43 @@ async function enrichDbRowsWithRouter(dbRows) {
     }
   })
 
-  const cards = dbRows.map((dbRow) => {
+  const cards = []
+  const missingCodes = []
+
+  for (const dbRow of dbRows) {
     const source = normalizeRouterSource(dbRow.routerSource)
     const cardWithDate = { printedAt: dbRow.printedAt, dbStatus: dbRow.dbStatus }
 
     if (source === ROUTER_SOURCE.USER_MANAGER) {
       const row = umIndex.byName.get(dbRow.code)
-      if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
-      return { ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate }
+      if (!row) {
+        missingCodes.push(dbRow.code)
+        continue
+      }
+      cards.push({ ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate })
+      continue
     }
 
     const row = hotspotIndex.byName.get(dbRow.code)
-    if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
-    return {
+    if (!row) {
+      missingCodes.push(dbRow.code)
+      continue
+    }
+    cards.push({
       ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
       ...cardWithDate,
-    }
-  })
+    })
+  }
+
+  let purged = 0
+  if (missingCodes.length) {
+    purged = await purgeStaleCardsFromDb(missingCodes)
+    console.info(`[mikrotik] purged ${purged} card(s) missing from router:`, missingCodes.join(', '))
+  }
 
   return {
     cards,
+    purged,
     sources: {
       hotspot: hotspotOk || codesBySource.hotspot.size === 0,
       userManager: userManagerAvailable && (umOk || codesBySource['user-manager'].size === 0),
@@ -1058,6 +1111,21 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
     for (const u of usersRaw || []) {
       const name = u.username || u.name
       if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
+    }
+  }
+
+  const unresolved = [...codeSet].filter((c) => !byName.has(c))
+  if (unresolved.length > 0 && codeSet.size <= 400) {
+    try {
+      const usersRaw = await api.write('/tool/user-manager/user/print')
+      for (const u of usersRaw || []) {
+        const name = u.username || u.name
+        if (name && codeSet.has(name) && !byName.has(name)) {
+          byName.set(name, mapUserManagerUserRow(u))
+        }
+      }
+    } catch {
+      // ignore fallback scan failure
     }
   }
 
@@ -1189,6 +1257,51 @@ export async function getCombinedInventory(options = {}) {
     console.warn('[mikrotik] inventory period fetch failed:', error.message)
     throw error
   }
+}
+
+export async function syncAgentPendingCardsWithRouter(agentId) {
+  const { rows } = await query(
+    `SELECT c.code, b.router_source AS routerSource
+     FROM cards c
+     INNER JOIN batches b ON b.id = c.batch_id
+     WHERE b.agent_id = $1 AND c.status = 'معلق'`,
+    [agentId]
+  )
+  if (!rows.length) return { purged: 0 }
+
+  const codesBySource = { hotspot: new Set(), 'user-manager': new Set() }
+  for (const row of rows) {
+    const source = normalizeRouterSource(row.routerSource)
+    const key = source === ROUTER_SOURCE.USER_MANAGER ? 'user-manager' : 'hotspot'
+    codesBySource[key].add(row.code)
+  }
+
+  const missingCodes = []
+
+  await withConnection(async (api) => {
+    if (codesBySource.hotspot.size > 0) {
+      const idx = await fetchHotspotUsersIndexed(api, codesBySource.hotspot)
+      for (const code of codesBySource.hotspot) {
+        if (!idx.byName.has(code)) missingCodes.push(code)
+      }
+    }
+    if (codesBySource['user-manager'].size > 0) {
+      try {
+        const idx = await fetchUserManagerUsersIndexed(api, codesBySource['user-manager'])
+        for (const code of codesBySource['user-manager']) {
+          if (!idx.byName.has(code)) missingCodes.push(code)
+        }
+      } catch (error) {
+        if (!isUserManagerUnavailable(error)) throw error
+      }
+    }
+  })
+
+  const purged = missingCodes.length ? await purgeStaleCardsFromDb(missingCodes) : 0
+  if (purged) {
+    console.info(`[mikrotik] agent ${agentId}: purged ${purged} stale pending card(s)`)
+  }
+  return { purged, missingCodes }
 }
 
 function inferCardCodeSettings(usernames) {
