@@ -399,6 +399,29 @@ function mapUserManagerProfileRow(p, limitation) {
   }
 }
 
+async function fetchUserManagerForCategorySync(api) {
+  const [customersRaw, profilesRaw, limitationsRaw] = await Promise.all([
+    api.write('/tool/user-manager/customer/print').catch(() => []),
+    api.write('/tool/user-manager/profile/print').catch(() => []),
+    api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
+  ])
+
+  const limitsByProfile = {}
+  for (const lim of limitationsRaw || []) {
+    if (lim.profile && !limitsByProfile[lim.profile]) limitsByProfile[lim.profile] = lim
+  }
+
+  const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
+  const profiles = (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
+  const defaultCustomer = pickDefaultUserManagerCustomer(customers, [])
+
+  return { customers, profiles, defaultCustomer }
+}
+
+export async function fetchUserManagerProfilesOnly() {
+  return withConnection(async (api) => fetchUserManagerForCategorySync(api))
+}
+
 export async function fetchUserManagerFromRouter() {
   return withConnection(async (api) => fetchUserManagerSnapshot(api))
 }
@@ -754,20 +777,18 @@ async function deleteDuplicateHotspotCategories(umProfileNames) {
 }
 
 export async function syncAllFromRouter() {
-  const [profiles, hotspotUsers] = await Promise.all([
-    getHotspotProfiles(),
-    getHotspotUsers(),
-  ])
+  const profiles = await getHotspotProfiles()
 
   let umProfiles = []
-  let umUsers = []
   let umCustomers = []
   let umDefaultCustomer = null
   let userManagerAvailable = true
+  let hotspotUsersCount = 0
+  let umUsersCount = 0
+
   try {
-    const um = await fetchUserManagerFromRouter()
+    const um = await fetchUserManagerProfilesOnly()
     umProfiles = um.profiles
-    umUsers = um.users
     umCustomers = um.customers
     umDefaultCustomer = um.defaultCustomer
   } catch (error) {
@@ -775,6 +796,15 @@ export async function syncAllFromRouter() {
     if (userManagerAvailable) {
       console.warn('[mikrotik] user-manager sync skipped:', error.message)
     }
+  }
+
+  try {
+    await withConnection(async (api) => {
+      hotspotUsersCount = await printCount(api, '/ip/hotspot/user/print')
+      umUsersCount = await printCount(api, '/tool/user-manager/user/print')
+    })
+  } catch (error) {
+    console.warn('[mikrotik] card count skipped:', error.message)
   }
 
   const deletedManual = await deleteManualCategories()
@@ -820,21 +850,12 @@ export async function syncAllFromRouter() {
     }
   }
 
-  const inferred = inferCardCodeSettings([
-    ...hotspotUsers.map((u) => u.name),
-    ...umUsers.map((u) => u.name),
-  ])
-  let cardSettings = null
-  if (inferred) {
-    await query(
-      `INSERT INTO card_settings (id, digits, chars) VALUES (1, $1, $2)
-       ON DUPLICATE KEY UPDATE digits = VALUES(digits), chars = VALUES(chars)`,
-      [inferred.digits, inferred.chars]
-    )
-    cardSettings = inferred
-  }
+  const { rows: settingsRows } = await query('SELECT digits, chars FROM card_settings WHERE id = 1')
+  const cardSettings = settingsRows[0]
+    ? { digits: settingsRows[0].digits, chars: settingsRows[0].chars, analyzed: 0, sampleCodes: [] }
+    : null
 
-  const totalCards = hotspotUsers.length + umUsers.length
+  const totalCards = hotspotUsersCount + umUsersCount
   await syncRouterCardsCount(totalCards)
 
   return {
@@ -846,8 +867,8 @@ export async function syncAllFromRouter() {
       profiles: categoryResults,
     },
     cardSettings,
-    hotspotUsers: hotspotUsers.length,
-    userManagerUsers: umUsers.length,
+    hotspotUsers: hotspotUsersCount,
+    userManagerUsers: umUsersCount,
     totalCards,
     userManagerAvailable,
     userManager: {
@@ -859,10 +880,7 @@ export async function syncAllFromRouter() {
       defaultCustomer: umDefaultCustomer,
       profiles: umProfiles.length,
     },
-    usersSample: [
-      ...hotspotUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.HOTSPOT })),
-      ...umUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.USER_MANAGER })),
-    ],
+    usersSample: [],
   }
 }
 
