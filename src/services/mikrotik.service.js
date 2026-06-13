@@ -410,13 +410,33 @@ async function pickBestRouterPath(api, paths) {
 
 const UM_PROFILE_LINK_PATHS = [
   '/tool/user-manager/profile/profile-limitation/print',
-  '/tool/user-manager/profile-limitation/print',
-  '/tool/user-manager/profile/limitation/print',
 ]
 
+// RouterOS 6.x stores limitation defs under profile/limitation; v7 may use /limitation
 const UM_LIMITATION_DEF_PATHS = [
+  '/tool/user-manager/profile/limitation/print',
   '/tool/user-manager/limitation/print',
 ]
+
+function scoreLimitationDefRows(rows) {
+  if (!rows?.length) return 0
+  const withUptime = rows.filter(
+    (row) => row['uptime-limit'] && row['uptime-limit'] !== '00:00:00'
+  ).length
+  return withUptime > 0 ? 1000 + withUptime : rows.length
+}
+
+async function pickBestLimitationDefPath(api, paths) {
+  const probes = await Promise.all(paths.map((path) => probeRouterPath(api, path)))
+  const viable = probes
+    .filter((p) => p.ok)
+    .sort((a, b) => scoreLimitationDefRows(b.rows) - scoreLimitationDefRows(a.rows))
+  return {
+    probes,
+    best: viable[0] || null,
+    rows: viable[0]?.rows || [],
+  }
+}
 
 async function fetchUptimeLimitsFromUsers(api, profilesRaw) {
   const idToName = buildProfileIdMap(profilesRaw)
@@ -468,6 +488,17 @@ function mergeLimitRows(existing, next) {
   }
 }
 
+function formatBytesQuota(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return null
+  if (n >= 1073741824) {
+    const gb = n / 1073741824
+    return Number.isInteger(gb) ? `${gb} جيجابايت` : `${gb.toFixed(2)} جيجابايت`
+  }
+  if (n >= 1048576) return `${Math.round(n / 1048576)} ميجابايت`
+  return `${n} بايت`
+}
+
 function resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesRaw) {
   const limitationByKey = buildLimitationLookup(limitationDefsRaw)
   const idToName = buildProfileIdMap(profilesRaw)
@@ -496,9 +527,9 @@ function applyUptimeFallback(limitsByProfile, uptimeByProfile) {
 }
 
 async function fetchUserManagerLimitationBundle(api, profilesRaw) {
-  const [limitationPick, profileLinkPick, userFallback] = await Promise.all([
-    pickBestRouterPath(api, UM_LIMITATION_DEF_PATHS),
+  const [profileLinkPick, limitationPick, userFallback] = await Promise.all([
     pickBestRouterPath(api, UM_PROFILE_LINK_PATHS),
+    pickBestLimitationDefPath(api, UM_LIMITATION_DEF_PATHS),
     fetchUptimeLimitsFromUsers(api, profilesRaw),
   ])
 
