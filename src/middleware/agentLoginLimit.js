@@ -1,4 +1,4 @@
-const FAIL_MAX = 10
+const FAIL_MAX = 5
 const FAIL_WINDOW_MS = 15 * 60 * 1000
 const LOCK_DURATIONS_MS = [
   5 * 60 * 1000,
