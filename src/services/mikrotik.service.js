@@ -1,9 +1,6 @@
 import { RouterOSAPI } from 'node-routeros'
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
-import { generateCardCode } from '../utils/cardCode.js'
-import { getCardSettings } from './settings.service.js'
-import { createBatchFromRouterPrint } from './cards.service.js'
 
 function getConnectionConfig() {
   let host = env.mikrotik.host.trim()
@@ -336,32 +333,22 @@ export async function syncCategoriesFromRouter() {
   }
 }
 
-export async function printHotspotUsers({ profile, count }) {
+export async function pushHotspotUsers({ profile, codes }) {
   const profileName = profile
-  const printCount = Number(count)
-  if (!profileName || !printCount || printCount < 1) {
-    throw new Error('الفئة وعدد الكروت مطلوبان')
+  if (!profileName || !codes?.length) {
+    throw new Error('بروفايل الراوتر والأكواد مطلوبان')
   }
-  if (printCount > 500) {
-    throw new Error('الحد الأقصى 500 كرت في المرة الواحدة')
-  }
-
-  const settings = await getCardSettings()
 
   return withConnection(async (api) => {
-    const codes = []
-
-    for (let i = 0; i < printCount; i += 1) {
+    for (const code of codes) {
       let added = false
       for (let attempt = 0; attempt < 5 && !added; attempt += 1) {
-        const code = generateCardCode(settings)
         try {
           await api.write('/ip/hotspot/user/add', [
             `=name=${code}`,
             `=password=${code}`,
             `=profile=${profileName}`,
           ])
-          codes.push({ username: code, password: code })
           added = true
         } catch (error) {
           if (attempt === 4) throw error
@@ -373,18 +360,6 @@ export async function printHotspotUsers({ profile, count }) {
     const liveCount = Array.isArray(users) ? users.length : codes.length
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
-    const batch = await createBatchFromRouterPrint({
-      profileName,
-      codes: codes.map((c) => c.username),
-    })
-
-    return {
-      ok: true,
-      printed: codes.length,
-      profile: profileName,
-      codes,
-      batchId: batch?.id,
-      totalOnRouter: liveCount,
-    }
+    return { added: codes.length, totalOnRouter: liveCount }
   })
 }

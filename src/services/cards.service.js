@@ -3,6 +3,7 @@ import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
 import { generateCardCode } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
+import { pushHotspotUsers } from './mikrotik.service.js'
 
 async function getBatchCards(batchId) {
   const { rows } = await query(
@@ -29,9 +30,21 @@ export async function getBatches() {
 }
 
 export async function createBatch({ categoryId, count, agentId }) {
-  const { rows: catRows } = await query('SELECT * FROM categories WHERE id = $1', [categoryId])
+  const printCount = Number(count)
+  if (!printCount || printCount < 1) throw new Error('عدد الكروت مطلوب')
+  if (printCount > 500) throw new Error('الحد الأقصى 500 كرت في المرة الواحدة')
+
+  const { rows: catRows } = await query(
+    'SELECT * FROM categories WHERE id = $1',
+    [categoryId]
+  )
   const category = catRows[0]
   if (!category) throw new Error('الفئة غير موجودة')
+
+  const profileName = category.router_profile
+  if (!profileName) {
+    throw new Error('الفئة غير مرتبطة ببروفايل الراوتر — نفّذ مزامنة من إعدادات الكرت أولاً')
+  }
 
   let agentName = '-'
   let agentDbId = null
@@ -46,14 +59,16 @@ export async function createBatch({ categoryId, count, agentId }) {
   const settings = await getCardSettings()
   const status = agentName !== '-' ? 'معلق' : 'مطبوع'
 
+  const codes = Array.from({ length: printCount }, () =>
+    generateCardCode({ digits: settings.digits, chars: settings.chars })
+  )
+
+  await pushHotspotUsers({ profile: profileName, codes })
+
   const { insertId: batchId } = await query(
     `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
      VALUES ($1, $2, $3, $4, $5, CURDATE())`,
-    [category.id, category.name, agentDbId, agentName, count]
-  )
-
-  const codes = Array.from({ length: count }, () =>
-    generateCardCode({ digits: settings.digits, chars: settings.chars })
+    [category.id, category.name, agentDbId, agentName, printCount]
   )
 
   const chunkSize = 100
@@ -72,7 +87,7 @@ export async function createBatch({ categoryId, count, agentId }) {
       agentId: agentDbId,
       batchId,
       categoryName: category.name,
-      count,
+      count: printCount,
       unitPrice: category.price,
     })
   }
@@ -88,45 +103,6 @@ export async function createBatch({ categoryId, count, agentId }) {
     count: batch.count,
     printedAt: formatDate(batch.printed_at),
     cards,
-  }
-}
-
-export async function createBatchFromRouterPrint({ profileName, codes }) {
-  if (!codes?.length) return null
-
-  const { rows: catRows } = await query(
-    'SELECT * FROM categories WHERE router_profile = $1 OR name = $1 LIMIT 1',
-    [profileName]
-  )
-  const category = catRows[0]
-
-  const { insertId: batchId } = await query(
-    `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
-     VALUES ($1, $2, NULL, $3, $4, CURDATE())`,
-    [category?.id || null, category?.name || profileName, 'الراوتر', codes.length]
-  )
-
-  const chunkSize = 100
-  for (let i = 0; i < codes.length; i += chunkSize) {
-    const chunk = codes.slice(i, i + chunkSize)
-    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
-    const params = chunk.flatMap((code) => [batchId, code, 'مطبوع'])
-    await query(
-      `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
-      params
-    )
-  }
-
-  const { rows: batchRows } = await query('SELECT * FROM batches WHERE id = $1', [batchId])
-  const batch = batchRows[0]
-  const cards = await getBatchCards(batchId)
-
-  return {
-    id: batch.id,
-    category: batch.category_name,
-    agent: batch.agent_name,
-    count: batch.count,
-    printedAt: formatDate(batch.printed_at),
-    cards,
+    routerProfile: profileName,
   }
 }

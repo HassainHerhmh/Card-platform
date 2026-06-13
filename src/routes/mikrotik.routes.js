@@ -5,7 +5,6 @@ import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
-  printHotspotUsers,
   syncRouterCardsCount,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
@@ -114,21 +113,6 @@ router.post('/sync-categories', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب البيانات من الراوتر' })
-  }
-})
-
-router.post('/print', async (req, res) => {
-  try {
-    const { category, profile, count } = req.body
-    const profileName = profile || category
-    if (!profileName || !count) {
-      return res.status(400).json({ message: 'الفئة وعدد الكروت مطلوبان' })
-    }
-    const result = await printHotspotUsers({ profile: profileName, count: Number(count) })
-    res.json(result)
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: error.message || 'تعذر الطباعة من الميكروتك' })
   }
 })
 

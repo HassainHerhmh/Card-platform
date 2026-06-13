@@ -66,7 +66,7 @@ npm run dev
 
 3. **الفرونت اند يطلب من الباك اند فقط**
    ```
-   POST /api/mikrotik/print
+   POST /api/cards/batches — ينشئ الدفعة ويرفع الكروت على MikroTik حسب بروفايل الفئة
    Authorization: Bearer <token>
    { "category": "يومي", "count": 50 }
    ```
