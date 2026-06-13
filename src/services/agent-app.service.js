@@ -76,12 +76,18 @@ export async function getAgentTransactions(agentId, limit = 20) {
   const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100)
   const { rows } = await query(
     `SELECT l.id, l.\`date\`, l.\`type\`, l.cards, l.amount, l.balance, l.description, l.reference_id,
+            l.created_at AS createdAt,
             (SELECT code FROM cards WHERE batch_id = l.reference_id ORDER BY id LIMIT 1) AS batchSampleCode,
             (SELECT sq.status FROM sms_queue sq
              WHERE sq.agent_id = l.agent_id
                AND l.\`type\` = 'بيع'
                AND l.description LIKE CONCAT('%كود ', SUBSTRING_INDEX(l.description, 'كود ', -1), '%')
-             ORDER BY sq.id DESC LIMIT 1) AS smsStatus
+             ORDER BY sq.id DESC LIMIT 1) AS smsStatus,
+            (SELECT sq.created_at FROM sms_queue sq
+             WHERE sq.agent_id = l.agent_id
+               AND l.\`type\` = 'بيع'
+               AND l.description LIKE CONCAT('%كود ', SUBSTRING_INDEX(l.description, 'كود ', -1), '%')
+             ORDER BY sq.id DESC LIMIT 1) AS smsCreatedAt
      FROM ledger l
      WHERE l.agent_id = $1
      ORDER BY l.\`date\` DESC, l.id DESC
@@ -124,6 +130,7 @@ export async function getAgentTransactions(agentId, limit = 20) {
       cardNumber: cardCode,
       amount: Math.abs(amount),
       date: formatDate(row.date),
+      occurredAt: row.smsCreatedAt || row.createdAt || row.date,
       status,
       statusNote,
       statusType,

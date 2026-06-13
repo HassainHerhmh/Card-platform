@@ -30,6 +30,7 @@ export async function migrate() {
     'ALTER TABLE ledger ADD COLUMN credit DECIMAL(12, 2) NOT NULL DEFAULT 0',
     'ALTER TABLE ledger ADD COLUMN description VARCHAR(500) NULL',
     'ALTER TABLE ledger ADD COLUMN reference_id INT NULL',
+    'ALTER TABLE ledger ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP',
   ]
 
   for (const patch of patches) {
