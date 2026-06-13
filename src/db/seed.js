@@ -22,19 +22,7 @@ export async function seed() {
     'INSERT INTO card_settings (id, digits, chars) VALUES (1, 8, 12) ON DUPLICATE KEY UPDATE id = id'
   )
 
-  const categories = [
-    ['كرت ابو 100', 100, '24 ساعة', '5 جيجا'],
-    ['يومي', 5, '24 ساعة', '1 جيجا'],
-    ['أسبوعي', 25, 'أسبوع', '10 جيجا'],
-    ['شهري', 75, 'شهر', '50 جيجا'],
-  ]
-  for (const [name, price, duration, dataQuota] of categories) {
-    await query(
-      'INSERT INTO categories (name, price, duration, data_quota) VALUES ($1, $2, $3, $4)',
-      [name, price, duration, dataQuota]
-    )
-  }
-
+  // الفئات تُجلب من الراوتر عبر المزامنة — لا نُدخل فئات تجريبية
   const agentPasswordHash = await bcrypt.hash('123456', 10)
   const agents = [
     ['أحمد السالم', '0501234567', 'الرياض', 15000, 'نشط', 245],

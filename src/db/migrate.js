@@ -32,6 +32,7 @@ export async function migrate() {
     'ALTER TABLE ledger ADD COLUMN reference_id INT NULL',
     'ALTER TABLE ledger ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP',
     'ALTER TABLE recharge_providers ADD COLUMN provider_type VARCHAR(100) DEFAULT ""',
+    'ALTER TABLE categories ADD COLUMN router_profile VARCHAR(255) NULL',
   ]
 
   for (const patch of patches) {
@@ -218,4 +219,14 @@ export async function migrate() {
       ['راوتر الرئيسي', 'hslink.pro:7227', mainRows[0].id]
     )
   }
+
+  // إزالة العدد التجريبي القديم — يُحدَّث لاحقاً من الراوتر مباشرة
+  await pool.execute('UPDATE mikrotik_routers SET cards_printed = 0')
+
+  // حذف فئات المنصة التجريبية (غير المرتبطة بالراوتر)
+  await pool.execute(`
+    DELETE c FROM categories c
+    LEFT JOIN batches b ON b.category_id = c.id
+    WHERE c.router_profile IS NULL AND b.id IS NULL
+  `)
 }

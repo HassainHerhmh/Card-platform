@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS categories (
   name VARCHAR(255) NOT NULL,
   price DECIMAL(10, 2) NOT NULL,
   duration VARCHAR(100) NOT NULL,
-  data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا'
+  data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا',
+  router_profile VARCHAR(255) NULL
 );
 
 CREATE TABLE IF NOT EXISTS agents (
