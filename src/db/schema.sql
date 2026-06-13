@@ -129,6 +129,27 @@ CREATE TABLE IF NOT EXISTS recharge_provider_config (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS recharge_carriers (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  code VARCHAR(50) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'نشط',
+  sort_order INT DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS recharge_services (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  carrier_id INT NOT NULL,
+  service_code VARCHAR(100) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  service_type VARCHAR(50) NOT NULL DEFAULT 'فوري',
+  price DECIMAL(12, 2) NOT NULL DEFAULT 0,
+  commission_percent DECIMAL(5, 2) NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'نشط',
+  FOREIGN KEY (carrier_id) REFERENCES recharge_carriers(id) ON DELETE CASCADE,
+  UNIQUE KEY uniq_carrier_service (carrier_id, service_code)
+);
+
 CREATE TABLE IF NOT EXISTS recharge_providers (
   id INT AUTO_INCREMENT PRIMARY KEY,
   provider_name VARCHAR(255) NOT NULL,
@@ -150,25 +171,4 @@ CREATE TABLE IF NOT EXISTS recharge_provider_services (
   PRIMARY KEY (provider_id, service_id),
   FOREIGN KEY (provider_id) REFERENCES recharge_providers(id) ON DELETE CASCADE,
   FOREIGN KEY (service_id) REFERENCES recharge_services(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS recharge_carriers (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  code VARCHAR(50) NOT NULL UNIQUE,
-  name VARCHAR(255) NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'نشط',
-  sort_order INT DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS recharge_services (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  carrier_id INT NOT NULL,
-  service_code VARCHAR(100) NOT NULL,
-  name VARCHAR(255) NOT NULL,
-  service_type VARCHAR(50) NOT NULL DEFAULT 'فوري',
-  price DECIMAL(12, 2) NOT NULL DEFAULT 0,
-  commission_percent DECIMAL(5, 2) NOT NULL DEFAULT 0,
-  status VARCHAR(20) NOT NULL DEFAULT 'نشط',
-  FOREIGN KEY (carrier_id) REFERENCES recharge_carriers(id) ON DELETE CASCADE,
-  UNIQUE KEY uniq_carrier_service (carrier_id, service_code)
 );
