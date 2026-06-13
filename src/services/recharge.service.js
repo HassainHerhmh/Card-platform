@@ -1,4 +1,5 @@
 import { query } from '../db/pool.js'
+import { queryProviderBalance } from './recharge-provider.client.js'
 
 const emptyProvider = {
   providerName: '',
@@ -166,6 +167,16 @@ export async function updateProvider(id, data) {
 
 export async function deleteProvider(id) {
   await query('DELETE FROM recharge_providers WHERE id = $1', [id])
+}
+
+export async function fetchProviderBalance(id) {
+  const provider = await getProviderById(id)
+  if (!provider) return { ok: false, error: 'المزود غير موجود', connectionIssue: true }
+  return queryProviderBalance(provider)
+}
+
+export async function fetchProviderBalanceFromCredentials(credentials) {
+  return queryProviderBalance(credentials)
 }
 
 export async function getProviderConfig() {

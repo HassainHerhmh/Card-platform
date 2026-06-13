@@ -58,6 +58,40 @@ router.delete('/providers/:id', async (req, res) => {
   }
 })
 
+router.get('/providers/:id/balance', async (req, res) => {
+  try {
+    const result = await rechargeService.fetchProviderBalance(Number(req.params.id))
+    if (!result.ok) {
+      res.status(502).json({
+        message: result.error || 'مشكلة في الربط مع المزود',
+        connectionIssue: true,
+        ...result,
+      })
+      return
+    }
+    res.json(result)
+  } catch (error) {
+    res.status(500).json({ message: 'تعذر استعلام رصيد المزود', connectionIssue: true })
+  }
+})
+
+router.post('/providers/balance-query', async (req, res) => {
+  try {
+    const result = await rechargeService.fetchProviderBalanceFromCredentials(req.body)
+    if (!result.ok) {
+      res.status(502).json({
+        message: result.error || 'مشكلة في الربط مع المزود',
+        connectionIssue: true,
+        ...result,
+      })
+      return
+    }
+    res.json(result)
+  } catch (error) {
+    res.status(500).json({ message: 'تعذر استعلام رصيد المزود', connectionIssue: true })
+  }
+})
+
 router.get('/provider', async (_req, res) => {
   try {
     const provider = await rechargeService.getProviderConfig()
