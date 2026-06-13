@@ -5,6 +5,34 @@ export function parseTimeHms(value) {
   return { hours: Number(match[1]) || 0, minutes: Number(match[2]) || 0 }
 }
 
+export function parseRosTime(value) {
+  if (value == null || value === '' || value === '00:00:00') return null
+
+  const hms = parseTimeHms(String(value))
+  if (hms && (hms.hours > 0 || hms.minutes > 0)) return hms
+
+  const raw = String(value).trim().toLowerCase()
+  if (!raw) return null
+
+  let totalMinutes = 0
+  const parts = [...raw.matchAll(/(\d+)([wdhms])/g)]
+  if (parts.length) {
+    for (const [, n, unit] of parts) {
+      const num = Number(n)
+      if (unit === 'w') totalMinutes += num * 7 * 24 * 60
+      else if (unit === 'd') totalMinutes += num * 24 * 60
+      else if (unit === 'h') totalMinutes += num * 60
+      else if (unit === 'm') totalMinutes += num
+      else if (unit === 's') totalMinutes += Math.ceil(num / 60)
+    }
+    if (totalMinutes > 0) {
+      return { hours: Math.floor(totalMinutes / 60), minutes: totalMinutes % 60 }
+    }
+  }
+
+  return null
+}
+
 export function parseValidityPeriod(value) {
   if (value == null || value === '') return { hours: 24, minutes: 0 }
 

@@ -18,15 +18,18 @@ export async function updateCardSettings({ digits, chars }) {
 }
 
 function mapCategoryRow(row) {
-  const routerSource = normalizeRouterSource(row.router_source)
+  const routerSource = normalizeRouterSource(row.routerSource ?? row.router_source)
   const durationHours = Number(row.durationHours ?? row.duration_hours ?? 24)
   const durationMinutes = Number(row.durationMinutes ?? row.duration_minutes ?? 0)
   return {
-    ...row,
+    id: row.id,
+    name: row.name,
     price: Number(row.price),
     durationHours,
     durationMinutes,
     duration: row.duration || formatDurationLabel(durationHours, durationMinutes),
+    dataQuota: row.dataQuota ?? row.data_quota ?? '1 جيجا',
+    routerProfile: row.routerProfile ?? row.router_profile ?? null,
     routerSource,
     routerSourceLabel: routerSourceLabelAr(routerSource),
   }

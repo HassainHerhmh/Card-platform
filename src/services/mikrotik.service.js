@@ -7,7 +7,7 @@ import {
   routerSourceLabel,
   routerSourceLabelAr,
 } from '../constants/routerSource.js'
-import { formatDurationLabel, parseTimeHms, parseValidityPeriod } from '../utils/duration.js'
+import { formatDurationLabel, parseRosTime, parseTimeHms, parseValidityPeriod } from '../utils/duration.js'
 
 function getConnectionConfig() {
   let host = env.mikrotik.host.trim()
@@ -356,15 +356,14 @@ function pickDefaultUserManagerCustomer(customers, users = []) {
 }
 
 async function fetchUserManagerSnapshot(api) {
-  const [customersRaw, usersRaw, profilesRaw, sessionsRaw, limitationsRaw] = await Promise.all([
+  const [customersRaw, usersRaw, profilesRaw, sessionsRaw] = await Promise.all([
     api.write('/tool/user-manager/customer/print').catch(() => []),
     api.write('/tool/user-manager/user/print').catch(() => []),
     api.write('/tool/user-manager/profile/print').catch(() => []),
     api.write('/tool/user-manager/session/print').catch(() => []),
-    api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
   ])
 
-  const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
+  const limitsByProfile = await fetchUserManagerLimitationData(api, profilesRaw)
 
   const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
   const users = (usersRaw || []).map(mapUserManagerUserRow)
@@ -380,20 +379,76 @@ async function fetchUserManagerSnapshot(api) {
   }
 }
 
-function indexProfileLimitations(limitationsRaw, profilesRaw) {
-  const limitsByProfile = {}
+async function printUserManagerProfileLimitations(api) {
+  const paths = [
+    '/tool/user-manager/profile/profile-limitation/print',
+    '/tool/user-manager/profile-limitation/print',
+    '/tool/user-manager/profile/limitation/print',
+  ]
+  for (const path of paths) {
+    try {
+      const rows = await api.write(path)
+      if (Array.isArray(rows) && rows.length > 0) return rows
+    } catch {
+      // try next path variant for this RouterOS version
+    }
+  }
+  return []
+}
+
+function buildLimitationLookup(limitationDefsRaw) {
+  const byKey = {}
+  for (const lim of limitationDefsRaw || []) {
+    if (lim.name) byKey[lim.name] = lim
+    if (lim['.id']) byKey[lim['.id']] = lim
+  }
+  return byKey
+}
+
+function pickLimitValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== '' && value !== '0' && value !== '00:00:00') {
+      return value
+    }
+  }
+  return ''
+}
+
+function mergeLimitRows(existing, next) {
+  return {
+    'uptime-limit': pickLimitValue(existing?.['uptime-limit'], next?.['uptime-limit']),
+    'download-limit': pickLimitValue(existing?.['download-limit'], next?.['download-limit']),
+    'upload-limit': pickLimitValue(existing?.['upload-limit'], next?.['upload-limit']),
+    'transfer-limit': pickLimitValue(existing?.['transfer-limit'], next?.['transfer-limit']),
+  }
+}
+
+function resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesRaw) {
+  const limitationByKey = buildLimitationLookup(limitationDefsRaw)
   const idToName = {}
   for (const p of profilesRaw || []) {
     if (p.name) idToName[p.name] = p.name
     if (p['.id']) idToName[p['.id']] = p.name
   }
-  for (const lim of limitationsRaw || []) {
-    const profileKey = lim.profile
-    if (!profileKey) continue
-    const name = idToName[profileKey] || profileKey
-    if (!limitsByProfile[name]) limitsByProfile[name] = lim
+
+  const limitsByProfile = {}
+  for (const link of profileLinksRaw || []) {
+    const profileName = idToName[link.profile] || link.profile
+    if (!profileName) continue
+
+    const limKey = link.limitation
+    const limDef = limitationByKey[limKey] || limitationByKey[idToName[limKey]] || link
+    limitsByProfile[profileName] = mergeLimitRows(limitsByProfile[profileName], limDef)
   }
   return limitsByProfile
+}
+
+async function fetchUserManagerLimitationData(api, profilesRaw) {
+  const [limitationDefsRaw, profileLinksRaw] = await Promise.all([
+    api.write('/tool/user-manager/limitation/print').catch(() => []),
+    printUserManagerProfileLimitations(api),
+  ])
+  return resolveProfileLimitations(profileLinksRaw, limitationDefsRaw, profilesRaw)
 }
 
 function mapUserManagerProfileRow(p, limitation) {
@@ -410,13 +465,12 @@ function mapUserManagerProfileRow(p, limitation) {
 }
 
 async function fetchUserManagerForCategorySync(api) {
-  const [customersRaw, profilesRaw, limitationsRaw] = await Promise.all([
+  const [customersRaw, profilesRaw] = await Promise.all([
     api.write('/tool/user-manager/customer/print').catch(() => []),
     api.write('/tool/user-manager/profile/print').catch(() => []),
-    api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
   ])
 
-  const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
+  const limitsByProfile = await fetchUserManagerLimitationData(api, profilesRaw)
 
   const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
   const profiles = (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
@@ -456,18 +510,15 @@ async function resolveUserManagerCustomer(api, explicitCustomer) {
 
 export async function getUserManagerProfiles() {
   return withConnection(async (api) => {
-    const [profilesRaw, limitationsRaw] = await Promise.all([
-      api.write('/tool/user-manager/profile/print'),
-      api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
-    ])
-    const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
+    const profilesRaw = await api.write('/tool/user-manager/profile/print')
+    const limitsByProfile = await fetchUserManagerLimitationData(api, profilesRaw)
     return (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
   })
 }
 
 function umProfileDurationParts(profile) {
   const validity = parseValidityPeriod(profile.validity)
-  const uptime = parseTimeHms(profile.uptimeLimit)
+  const uptime = parseRosTime(profile.uptimeLimit)
   return {
     durationHours: uptime?.hours ?? 0,
     durationMinutes: uptime?.minutes ?? 0,
@@ -720,10 +771,18 @@ async function upsertCategoryFromProfile({
   const durLabel = duration || formatDurationLabel(durHours, durMinutes)
   const categoryPrice = Number(price) || 0
 
-  const { rows } = await query(
+  let { rows } = await query(
     'SELECT id FROM categories WHERE router_profile = $1 AND router_source = $2 LIMIT 1',
     [name, normalizedSource]
   )
+
+  if (!rows[0] && normalizedSource === ROUTER_SOURCE.USER_MANAGER) {
+    const fallback = await query(
+      'SELECT id FROM categories WHERE router_profile = $1 LIMIT 1',
+      [name]
+    )
+    rows = fallback.rows
+  }
 
   if (rows[0]) {
     await query(
