@@ -63,8 +63,6 @@ export async function createBatch({ categoryId, count, agentId }) {
     generateCardCode({ digits: settings.digits, chars: settings.chars })
   )
 
-  await pushHotspotUsers({ profile: profileName, codes })
-
   const { insertId: batchId } = await query(
     `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
      VALUES ($1, $2, $3, $4, $5, CURDATE())`,
@@ -72,14 +70,22 @@ export async function createBatch({ categoryId, count, agentId }) {
   )
 
   const chunkSize = 100
-  for (let i = 0; i < codes.length; i += chunkSize) {
-    const chunk = codes.slice(i, i + chunkSize)
-    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
-    const params = chunk.flatMap((code) => [batchId, code, status])
-    await query(
-      `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
-      params
-    )
+  try {
+    for (let i = 0; i < codes.length; i += chunkSize) {
+      const chunk = codes.slice(i, i + chunkSize)
+      const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
+      const params = chunk.flatMap((code) => [batchId, code, status])
+      await query(
+        `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
+        params
+      )
+    }
+
+    await pushHotspotUsers({ profile: profileName, codes })
+  } catch (error) {
+    await query('DELETE FROM cards WHERE batch_id = $1', [batchId])
+    await query('DELETE FROM batches WHERE id = $1', [batchId])
+    throw error
   }
 
   if (agentDbId) {

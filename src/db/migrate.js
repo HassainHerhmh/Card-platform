@@ -230,17 +230,20 @@ export async function migrate() {
     WHERE c.router_profile IS NULL AND b.id IS NULL
   `)
 
-  // حذف الكروت والدفعات القديمة المخزّنة في المنصة (بيانات تجريبية)
-  try {
-    await pool.execute('DELETE FROM sms_queue WHERE card_id IS NOT NULL')
-  } catch (error) {
-    console.warn('sms_queue cleanup skipped:', error.message)
+  // لا تحذف الدفعات تلقائياً — كان يمسح كل طباعة عند إعادة تشغيل السيرفر
+  if (process.env.CLEAR_LEGACY_BATCHES === '1') {
+    try {
+      await pool.execute('DELETE FROM sms_queue WHERE card_id IS NOT NULL')
+    } catch (error) {
+      console.warn('sms_queue cleanup skipped:', error.message)
+    }
+    try {
+      await pool.execute('UPDATE ledger SET reference_id = NULL WHERE reference_id IS NOT NULL')
+    } catch (error) {
+      console.warn('ledger reference cleanup skipped:', error.message)
+    }
+    await pool.execute('DELETE FROM cards')
+    await pool.execute('DELETE FROM batches')
+    console.log('All batches cleared (CLEAR_LEGACY_BATCHES=1)')
   }
-  try {
-    await pool.execute('UPDATE ledger SET reference_id = NULL WHERE reference_id IS NOT NULL')
-  } catch (error) {
-    console.warn('ledger reference cleanup skipped:', error.message)
-  }
-  await pool.execute('DELETE FROM cards')
-  await pool.execute('DELETE FROM batches')
 }
