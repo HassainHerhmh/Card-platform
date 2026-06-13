@@ -40,5 +40,6 @@ export const env = {
     user: process.env.MIKROTIK_USER || '',
     password: process.env.MIKROTIK_PASSWORD || '',
     useTls: process.env.MIKROTIK_USE_TLS === 'true',
+    userManagerCustomer: process.env.MIKROTIK_UM_CUSTOMER || 'admin',
   },
 }

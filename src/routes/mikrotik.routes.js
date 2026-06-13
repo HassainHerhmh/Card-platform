@@ -5,7 +5,8 @@ import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
-  getHotspotInventory,
+  getCombinedInventory,
+  getUserManagerProfiles,
   syncRouterCardsCount,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
@@ -16,7 +17,7 @@ router.use(requireAuth)
 router.get('/routers', async (_req, res) => {
   try {
     const status = await getRouterStatus()
-    const liveCount = status.hotspotUsers ?? 0
+    const liveCount = status.totalCards ?? status.hotspotUsers ?? 0
     if (status.connected) {
       await syncRouterCardsCount(liveCount)
     }
@@ -34,8 +35,11 @@ router.get('/routers', async (_req, res) => {
           status: status.connected ? 'متصل' : 'غير متصل',
           version: status.version,
           boardName: status.boardName,
-          hotspotUsers: liveCount,
+          hotspotUsers: status.hotspotUsers ?? 0,
+          userManagerUsers: status.userManagerUsers ?? 0,
+          totalCards: liveCount,
           activeHotspotUsers: status.activeHotspotUsers ?? 0,
+          activeUserManagerSessions: status.activeUserManagerSessions ?? 0,
           cardsPrinted: liveCount,
         }]
       : status.host
@@ -47,8 +51,11 @@ router.get('/routers', async (_req, res) => {
             status: status.connected ? 'متصل' : 'غير متصل',
             version: status.version,
             boardName: status.boardName,
-            hotspotUsers: liveCount,
+            hotspotUsers: status.hotspotUsers ?? 0,
+            userManagerUsers: status.userManagerUsers ?? 0,
+            totalCards: liveCount,
             activeHotspotUsers: status.activeHotspotUsers ?? 0,
+            activeUserManagerSessions: status.activeUserManagerSessions ?? 0,
           }]
         : []
 
@@ -63,7 +70,7 @@ router.get('/status', async (_req, res) => {
   try {
     const status = await getRouterStatus()
     if (status.connected) {
-      await syncRouterCardsCount(status.hotspotUsers ?? 0)
+      await syncRouterCardsCount(status.totalCards ?? status.hotspotUsers ?? 0)
     }
     res.json(status)
   } catch (error) {
@@ -83,11 +90,21 @@ router.get('/profiles', async (_req, res) => {
 
 router.get('/inventory', async (_req, res) => {
   try {
-    const inventory = await getHotspotInventory()
+    const inventory = await getCombinedInventory()
     res.json(inventory)
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب مخزون الكروت من الراوتر' })
+  }
+})
+
+router.get('/user-manager/profiles', async (_req, res) => {
+  try {
+    const profiles = await getUserManagerProfiles()
+    res.json({ profiles })
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر جلب بروفايلات User Manager' })
   }
 })
 

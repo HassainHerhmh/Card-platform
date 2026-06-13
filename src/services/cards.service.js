@@ -3,7 +3,11 @@ import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
 import { generateCardCode } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
-import { pushHotspotUsers } from './mikrotik.service.js'
+import { pushRouterUsers } from './mikrotik.service.js'
+import {
+  routerSourceLabelAr,
+  normalizeRouterSource,
+} from '../constants/routerSource.js'
 
 async function getBatchCards(batchId) {
   const { rows } = await query(
@@ -23,6 +27,8 @@ export async function getBatches() {
       agent: row.agent_name,
       count: row.count,
       printedAt: formatDate(row.printed_at),
+      routerSource: normalizeRouterSource(row.router_source),
+      routerSourceLabel: routerSourceLabelAr(row.router_source),
       cards: await getBatchCards(row.id),
     })
   }
@@ -63,10 +69,12 @@ export async function createBatch({ categoryId, count, agentId }) {
     generateCardCode({ digits: settings.digits, chars: settings.chars })
   )
 
+  const routerSource = normalizeRouterSource(category.router_source)
+
   const { insertId: batchId } = await query(
-    `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
-     VALUES ($1, $2, $3, $4, $5, CURDATE())`,
-    [category.id, category.name, agentDbId, agentName, printCount]
+    `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at, router_source)
+     VALUES ($1, $2, $3, $4, $5, CURDATE(), $6)`,
+    [category.id, category.name, agentDbId, agentName, printCount, routerSource]
   )
 
   const chunkSize = 100
@@ -81,7 +89,7 @@ export async function createBatch({ categoryId, count, agentId }) {
       )
     }
 
-    await pushHotspotUsers({ profile: profileName, codes })
+    await pushRouterUsers({ source: routerSource, profile: profileName, codes })
   } catch (error) {
     await query('DELETE FROM cards WHERE batch_id = $1', [batchId])
     await query('DELETE FROM batches WHERE id = $1', [batchId])
@@ -110,5 +118,7 @@ export async function createBatch({ categoryId, count, agentId }) {
     printedAt: formatDate(batch.printed_at),
     cards,
     routerProfile: profileName,
+    routerSource,
+    routerSourceLabel: routerSourceLabelAr(routerSource),
   }
 }

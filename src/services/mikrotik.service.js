@@ -1,6 +1,12 @@
 import { RouterOSAPI } from 'node-routeros'
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
+import {
+  ROUTER_SOURCE,
+  normalizeRouterSource,
+  routerSourceLabel,
+  routerSourceLabelAr,
+} from '../constants/routerSource.js'
 
 function getConnectionConfig() {
   let host = env.mikrotik.host.trim()
@@ -97,6 +103,8 @@ export async function getRouterStatus() {
       const resourceRows = await api.write('/system/resource/print')
       let hotspotUsers = 0
       let activeHotspotUsers = 0
+      let userManagerUsers = 0
+      let activeUserManagerSessions = 0
       try {
         const users = await api.write('/ip/hotspot/user/print')
         hotspotUsers = Array.isArray(users) ? users.length : 0
@@ -108,6 +116,18 @@ export async function getRouterStatus() {
         activeHotspotUsers = Array.isArray(active) ? active.length : 0
       } catch {
         activeHotspotUsers = 0
+      }
+      try {
+        const umUsers = await api.write('/tool/user-manager/user/print')
+        userManagerUsers = Array.isArray(umUsers) ? umUsers.length : 0
+      } catch {
+        userManagerUsers = 0
+      }
+      try {
+        const umSessions = await api.write('/tool/user-manager/session/print')
+        activeUserManagerSessions = Array.isArray(umSessions) ? umSessions.length : 0
+      } catch {
+        activeUserManagerSessions = 0
       }
 
       const identity = identityRows?.[0] || {}
@@ -124,6 +144,9 @@ export async function getRouterStatus() {
         uptime: resource.uptime || '',
         hotspotUsers,
         activeHotspotUsers,
+        userManagerUsers,
+        activeUserManagerSessions,
+        totalCards: hotspotUsers + userManagerUsers,
         cpuLoad: resource['cpu-load'] ?? null,
         message: `متصل — ${identity.name || connection.host}`,
       }
@@ -197,14 +220,14 @@ function hasCardUsage(user) {
   return Boolean(uptime && uptime !== '0s') || bytesIn > 0 || bytesOut > 0
 }
 
-function resolveCardStatus(user, activeUsernames) {
+function resolveCardStatus(user, activeUsernames, usageCheck = hasCardUsage) {
   if (user.disabled) {
     return { status: 'disabled', label: 'معطّل' }
   }
   if (activeUsernames.has(user.name)) {
     return { status: 'connected', label: 'متصل الآن' }
   }
-  if (hasCardUsage(user)) {
+  if (usageCheck(user)) {
     return { status: 'expired', label: 'منتهي' }
   }
   return { status: 'available', label: 'نشط' }
@@ -231,6 +254,9 @@ export async function getHotspotInventory() {
         statusLabel: label,
         connectedIp: activeSession?.address || '',
         sessionUptime: activeSession?.uptime || '',
+        source: ROUTER_SOURCE.HOTSPOT,
+        sourceLabel: routerSourceLabel(ROUTER_SOURCE.HOTSPOT),
+        sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
       }
     })
 
@@ -250,6 +276,165 @@ export async function getHotspotInventory() {
       fetchedAt: new Date().toISOString(),
     }
   })
+}
+
+function isUserManagerUnavailable(error) {
+  const msg = error?.message || String(error)
+  return /no such command|bad command|cannot find|not implemented|user manager is not/i.test(msg)
+}
+
+export async function getUserManagerProfiles() {
+  return withConnection(async (api) => {
+    const profiles = await api.write('/tool/user-manager/profile/print')
+    return (profiles || []).map((p) => ({
+      id: p['.id'],
+      name: p.name,
+      validity: p.validity || '',
+      price: p.price || '',
+      owner: p.owner || '',
+      nameForUsers: p['name-for-users'] || '',
+    }))
+  })
+}
+
+function umProfileDuration(profile) {
+  return profile.validity || '24 ساعة'
+}
+
+function umProfileDataQuota(profile) {
+  return profile.nameForUsers || profile.price || '1 جيجا'
+}
+
+export async function getUserManagerUsers() {
+  return withConnection(async (api) => {
+    const users = await api.write('/tool/user-manager/user/print')
+    return (users || []).map((u) => mapUserManagerUserRow(u))
+  })
+}
+
+function mapUserManagerUserRow(u) {
+  return {
+    id: u['.id'],
+    name: u.username || u.name || '',
+    password: u.password || '',
+    profile: u['actual-profile'] || u.profile || '',
+    comment: u.comment || u.location || '',
+    disabled: u.disabled === 'true',
+    uptime: u['uptime-used'] || '',
+    limitUptime: u['uptime-limit'] || '',
+    bytesIn: u['download-used'] || '',
+    bytesOut: u['upload-used'] || '',
+    customer: u.customer || '',
+  }
+}
+
+function hasUserManagerUsage(user) {
+  const uptime = user.uptime || ''
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  return Boolean(uptime && uptime !== '0s') || bytesIn > 0 || bytesOut > 0
+}
+
+export async function getUserManagerInventory() {
+  return withConnection(async (api) => {
+    const [users, sessions] = await Promise.all([
+      api.write('/tool/user-manager/user/print'),
+      api.write('/tool/user-manager/session/print').catch(() => []),
+    ])
+
+    const activeUsernames = new Set(
+      (sessions || []).map((s) => s.user || s.username).filter(Boolean)
+    )
+
+    const cards = (users || []).map((u) => {
+      const row = mapUserManagerUserRow(u)
+      const { status, label } = resolveCardStatus(row, activeUsernames, hasUserManagerUsage)
+      const activeSession = (sessions || []).find(
+        (s) => (s.user || s.username) === row.name
+      )
+      return {
+        ...row,
+        status,
+        statusLabel: label,
+        connectedIp: activeSession?.['ip-address'] || activeSession?.address || '',
+        sessionUptime: activeSession?.uptime || '',
+        source: ROUTER_SOURCE.USER_MANAGER,
+        sourceLabel: routerSourceLabel(ROUTER_SOURCE.USER_MANAGER),
+        sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.USER_MANAGER),
+      }
+    })
+
+    cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+    const summary = {
+      total: cards.length,
+      available: cards.filter((c) => c.status === 'available').length,
+      connected: cards.filter((c) => c.status === 'connected').length,
+      expired: cards.filter((c) => c.status === 'expired').length,
+      disabled: cards.filter((c) => c.status === 'disabled').length,
+    }
+
+    return {
+      cards,
+      summary,
+      fetchedAt: new Date().toISOString(),
+    }
+  })
+}
+
+export async function getCombinedInventory() {
+  let hotspotResult = null
+  let userManagerResult = null
+  let userManagerAvailable = true
+
+  try {
+    hotspotResult = await getHotspotInventory()
+  } catch (error) {
+    console.warn('[mikrotik] hotspot inventory failed:', error.message)
+  }
+
+  try {
+    userManagerResult = await getUserManagerInventory()
+  } catch (error) {
+    if (isUserManagerUnavailable(error)) {
+      userManagerAvailable = false
+    } else {
+      console.warn('[mikrotik] user-manager inventory failed:', error.message)
+    }
+  }
+
+  const hotspotCards = (hotspotResult?.cards || []).map((card) => ({
+    ...card,
+    source: ROUTER_SOURCE.HOTSPOT,
+    sourceLabel: routerSourceLabel(ROUTER_SOURCE.HOTSPOT),
+    sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
+  }))
+
+  const userManagerCards = userManagerResult?.cards || []
+
+  const cards = [...hotspotCards, ...userManagerCards].sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true })
+  )
+
+  const summary = {
+    total: cards.length,
+    available: cards.filter((c) => c.status === 'available').length,
+    connected: cards.filter((c) => c.status === 'connected').length,
+    expired: cards.filter((c) => c.status === 'expired').length,
+    disabled: cards.filter((c) => c.status === 'disabled').length,
+    hotspot: hotspotCards.length,
+    userManager: userManagerCards.length,
+  }
+
+  return {
+    cards,
+    summary,
+    sources: {
+      hotspot: Boolean(hotspotResult),
+      userManager: userManagerAvailable && Boolean(userManagerResult),
+    },
+    fetchedAt: new Date().toISOString(),
+  }
 }
 
 function inferCardCodeSettings(usernames) {
@@ -296,12 +481,17 @@ async function deleteManualCategories() {
   return deleted
 }
 
-async function deleteStaleRouterCategories(profileNames) {
+async function deleteStaleRouterCategories(profileNames, source = ROUTER_SOURCE.HOTSPOT) {
+  const normalizedSource = normalizeRouterSource(source)
+
   if (!profileNames.length) {
     const { rows } = await query(
       `SELECT c.id FROM categories c
        LEFT JOIN batches b ON b.category_id = c.id
-       WHERE c.router_profile IS NOT NULL AND b.id IS NULL`
+       WHERE c.router_profile IS NOT NULL
+         AND c.router_source = $1
+         AND b.id IS NULL`,
+      [normalizedSource]
     )
     let deleted = 0
     for (const row of rows) {
@@ -311,14 +501,15 @@ async function deleteStaleRouterCategories(profileNames) {
     return deleted
   }
 
-  const placeholders = profileNames.map((_, i) => `$${i + 1}`).join(', ')
+  const placeholders = profileNames.map((_, i) => `$${i + 2}`).join(', ')
   const { rows } = await query(
     `SELECT c.id FROM categories c
      LEFT JOIN batches b ON b.category_id = c.id
      WHERE c.router_profile IS NOT NULL
+       AND c.router_source = $1
        AND c.router_profile NOT IN (${placeholders})
        AND b.id IS NULL`,
-    profileNames
+    [normalizedSource, ...profileNames]
   )
   let deleted = 0
   for (const row of rows) {
@@ -328,44 +519,83 @@ async function deleteStaleRouterCategories(profileNames) {
   return deleted
 }
 
+async function upsertCategoryFromProfile({ name, duration, dataQuota, source }) {
+  const normalizedSource = normalizeRouterSource(source)
+  const { rows } = await query(
+    'SELECT id FROM categories WHERE router_profile = $1 AND router_source = $2 LIMIT 1',
+    [name, normalizedSource]
+  )
+
+  if (rows[0]) {
+    await query(
+      `UPDATE categories
+       SET name = $1, duration = $2, data_quota = $3, router_profile = $4, router_source = $5
+       WHERE id = $6`,
+      [name, duration, dataQuota, name, normalizedSource, rows[0].id]
+    )
+    return { action: 'updated', name, source: normalizedSource }
+  }
+
+  await query(
+    `INSERT INTO categories (name, price, duration, data_quota, router_profile, router_source)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [name, 0, duration, dataQuota, name, normalizedSource]
+  )
+  return { action: 'created', name, source: normalizedSource }
+}
+
 export async function syncAllFromRouter() {
   const [profiles, hotspotUsers] = await Promise.all([
     getHotspotProfiles(),
     getHotspotUsers(),
   ])
 
-  const deletedManual = await deleteManualCategories()
-  const profileNames = profiles.map((p) => p.name)
-  const deletedStale = await deleteStaleRouterCategories(profileNames)
-
-  const categoryResults = []
-  for (const profile of profiles) {
-    const dataQuota = profileDataQuota(profile)
-    const duration = profileDuration(profile)
-    const { rows } = await query(
-      'SELECT id FROM categories WHERE router_profile = $1 OR name = $2 LIMIT 1',
-      [profile.name, profile.name]
-    )
-
-    if (rows[0]) {
-      await query(
-        `UPDATE categories
-         SET name = $1, duration = $2, data_quota = $3, router_profile = $4
-         WHERE id = $5`,
-        [profile.name, duration, dataQuota, profile.name, rows[0].id]
-      )
-      categoryResults.push({ action: 'updated', name: profile.name })
-    } else {
-      await query(
-        `INSERT INTO categories (name, price, duration, data_quota, router_profile)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [profile.name, 0, duration, dataQuota, profile.name]
-      )
-      categoryResults.push({ action: 'created', name: profile.name })
+  let umProfiles = []
+  let umUsers = []
+  let userManagerAvailable = true
+  try {
+    umProfiles = await getUserManagerProfiles()
+    umUsers = await getUserManagerUsers()
+  } catch (error) {
+    userManagerAvailable = !isUserManagerUnavailable(error)
+    if (userManagerAvailable) {
+      console.warn('[mikrotik] user-manager sync skipped:', error.message)
     }
   }
 
-  const inferred = inferCardCodeSettings(hotspotUsers.map((u) => u.name))
+  const deletedManual = await deleteManualCategories()
+  const profileNames = profiles.map((p) => p.name)
+  const umProfileNames = umProfiles.map((p) => p.name)
+  const deletedStaleHotspot = await deleteStaleRouterCategories(profileNames, ROUTER_SOURCE.HOTSPOT)
+  const deletedStaleUm = userManagerAvailable
+    ? await deleteStaleRouterCategories(umProfileNames, ROUTER_SOURCE.USER_MANAGER)
+    : 0
+
+  const categoryResults = []
+  for (const profile of profiles) {
+    categoryResults.push(await upsertCategoryFromProfile({
+      name: profile.name,
+      duration: profileDuration(profile),
+      dataQuota: profileDataQuota(profile),
+      source: ROUTER_SOURCE.HOTSPOT,
+    }))
+  }
+
+  if (userManagerAvailable) {
+    for (const profile of umProfiles) {
+      categoryResults.push(await upsertCategoryFromProfile({
+        name: profile.name,
+        duration: umProfileDuration(profile),
+        dataQuota: umProfileDataQuota(profile),
+        source: ROUTER_SOURCE.USER_MANAGER,
+      }))
+    }
+  }
+
+  const inferred = inferCardCodeSettings([
+    ...hotspotUsers.map((u) => u.name),
+    ...umUsers.map((u) => u.name),
+  ])
   let cardSettings = null
   if (inferred) {
     await query(
@@ -376,21 +606,25 @@ export async function syncAllFromRouter() {
     cardSettings = inferred
   }
 
-  await syncRouterCardsCount(hotspotUsers.length)
+  const totalCards = hotspotUsers.length + umUsers.length
+  await syncRouterCardsCount(totalCards)
 
   return {
     categories: {
       synced: categoryResults.length,
       deletedManual,
-      deletedStale,
+      deletedStale: deletedStaleHotspot + deletedStaleUm,
       profiles: categoryResults,
     },
     cardSettings,
     hotspotUsers: hotspotUsers.length,
-    usersSample: hotspotUsers.slice(0, 10).map((u) => ({
-      name: u.name,
-      profile: u.profile,
-    })),
+    userManagerUsers: umUsers.length,
+    totalCards,
+    userManagerAvailable,
+    usersSample: [
+      ...hotspotUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.HOTSPOT })),
+      ...umUsers.slice(0, 5).map((u) => ({ name: u.name, profile: u.profile, source: ROUTER_SOURCE.USER_MANAGER })),
+    ],
   }
 }
 
@@ -403,6 +637,60 @@ export async function syncCategoriesFromRouter() {
     deletedManual: result.categories.deletedManual,
     cardSettings: result.cardSettings,
   }
+}
+
+export async function pushUserManagerUsers({ profile, codes, customer }) {
+  const profileName = profile
+  const cust = customer || env.mikrotik.userManagerCustomer || 'admin'
+  if (!profileName || !codes?.length) {
+    throw new Error('بروفايل User Manager والأكواد مطلوبان')
+  }
+
+  return withConnection(async (api) => {
+    for (const code of codes) {
+      let added = false
+      for (let attempt = 0; attempt < 5 && !added; attempt += 1) {
+        try {
+          await api.write('/tool/user-manager/user/add', [
+            `=username=${code}`,
+            `=password=${code}`,
+            `=customer=${cust}`,
+          ])
+          await api.write('/tool/user-manager/user/create-and-activate-profile', [
+            `=customer=${cust}`,
+            `=numbers=${code}`,
+            `=profile=${profileName}`,
+          ])
+          added = true
+        } catch (error) {
+          if (attempt === 4) throw error
+        }
+      }
+    }
+
+    const users = await api.write('/tool/user-manager/user/print')
+    const umCount = Array.isArray(users) ? users.length : codes.length
+    let hotspotCount = 0
+    try {
+      const hotspotUsers = await api.write('/ip/hotspot/user/print')
+      hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : 0
+    } catch {
+      hotspotCount = 0
+    }
+
+    const liveCount = hotspotCount + umCount
+    await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
+
+    return { added: codes.length, totalOnRouter: liveCount, userManagerTotal: umCount }
+  })
+}
+
+export async function pushRouterUsers({ source, profile, codes }) {
+  const normalizedSource = normalizeRouterSource(source)
+  if (normalizedSource === ROUTER_SOURCE.USER_MANAGER) {
+    return pushUserManagerUsers({ profile, codes })
+  }
+  return pushHotspotUsers({ profile, codes })
 }
 
 export async function pushHotspotUsers({ profile, codes }) {
@@ -428,8 +716,17 @@ export async function pushHotspotUsers({ profile, codes }) {
       }
     }
 
-    const users = await api.write('/ip/hotspot/user/print')
-    const liveCount = Array.isArray(users) ? users.length : codes.length
+    const hotspotUsers = await api.write('/ip/hotspot/user/print')
+    const hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : codes.length
+    let umCount = 0
+    try {
+      const umUsers = await api.write('/tool/user-manager/user/print')
+      umCount = Array.isArray(umUsers) ? umUsers.length : 0
+    } catch {
+      umCount = 0
+    }
+
+    const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
     return { added: codes.length, totalOnRouter: liveCount }

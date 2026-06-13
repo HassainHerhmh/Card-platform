@@ -33,6 +33,8 @@ export async function migrate() {
     'ALTER TABLE ledger ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP',
     'ALTER TABLE recharge_providers ADD COLUMN provider_type VARCHAR(100) DEFAULT ""',
     'ALTER TABLE categories ADD COLUMN router_profile VARCHAR(255) NULL',
+    "ALTER TABLE categories ADD COLUMN router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'",
+    "ALTER TABLE batches ADD COLUMN router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'",
   ]
 
   for (const patch of patches) {

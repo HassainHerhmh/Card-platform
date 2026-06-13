@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS categories (
   price DECIMAL(10, 2) NOT NULL,
   duration VARCHAR(100) NOT NULL,
   data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا',
-  router_profile VARCHAR(255) NULL
+  router_profile VARCHAR(255) NULL,
+  router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot'
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS batches (
   agent_name VARCHAR(255) NOT NULL DEFAULT '-',
   `count` INT NOT NULL,
   printed_at DATE NOT NULL DEFAULT (CURRENT_DATE),
+  router_source VARCHAR(20) NOT NULL DEFAULT 'hotspot',
   FOREIGN KEY (category_id) REFERENCES categories(id),
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
