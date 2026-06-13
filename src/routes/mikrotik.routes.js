@@ -5,6 +5,7 @@ import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
+  getHotspotInventory,
   syncRouterCardsCount,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
@@ -77,6 +78,16 @@ router.get('/profiles', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب بروفايلات الهوتسبوت' })
+  }
+})
+
+router.get('/inventory', async (_req, res) => {
+  try {
+    const inventory = await getHotspotInventory()
+    res.json(inventory)
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر جلب مخزون الكروت من الراوتر' })
   }
 })
 

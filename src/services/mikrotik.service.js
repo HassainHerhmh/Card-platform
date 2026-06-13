@@ -169,14 +169,86 @@ function profileDataQuota(profile) {
 export async function getHotspotUsers() {
   return withConnection(async (api) => {
     const users = await api.write('/ip/hotspot/user/print')
-    return (users || []).map((u) => ({
-      id: u['.id'],
-      name: u.name || '',
-      password: u.password || '',
-      profile: u.profile || '',
-      comment: u.comment || '',
-      disabled: u.disabled === 'true',
-    }))
+    return (users || []).map((u) => mapHotspotUserRow(u))
+  })
+}
+
+function mapHotspotUserRow(u) {
+  return {
+    id: u['.id'],
+    name: u.name || '',
+    password: u.password || '',
+    profile: u.profile || '',
+    comment: u.comment || '',
+    disabled: u.disabled === 'true',
+    uptime: u.uptime || '',
+    limitUptime: u['limit-uptime'] || '',
+    limitBytesIn: u['limit-bytes-in'] || '',
+    limitBytesOut: u['limit-bytes-out'] || '',
+    bytesIn: u['bytes-in'] || '',
+    bytesOut: u['bytes-out'] || '',
+  }
+}
+
+function hasCardUsage(user) {
+  const uptime = user.uptime || ''
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  return Boolean(uptime && uptime !== '0s') || bytesIn > 0 || bytesOut > 0
+}
+
+function resolveCardStatus(user, activeUsernames) {
+  if (user.disabled) {
+    return { status: 'disabled', label: 'معطّل' }
+  }
+  if (activeUsernames.has(user.name)) {
+    return { status: 'connected', label: 'متصل الآن' }
+  }
+  if (hasCardUsage(user)) {
+    return { status: 'expired', label: 'منتهي' }
+  }
+  return { status: 'available', label: 'نشط' }
+}
+
+export async function getHotspotInventory() {
+  return withConnection(async (api) => {
+    const [users, activeSessions] = await Promise.all([
+      api.write('/ip/hotspot/user/print'),
+      api.write('/ip/hotspot/active/print').catch(() => []),
+    ])
+
+    const activeUsernames = new Set(
+      (activeSessions || []).map((s) => s.user).filter(Boolean)
+    )
+
+    const cards = (users || []).map((u) => {
+      const row = mapHotspotUserRow(u)
+      const { status, label } = resolveCardStatus(row, activeUsernames)
+      const activeSession = (activeSessions || []).find((s) => s.user === row.name)
+      return {
+        ...row,
+        status,
+        statusLabel: label,
+        connectedIp: activeSession?.address || '',
+        sessionUptime: activeSession?.uptime || '',
+      }
+    })
+
+    cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+    const summary = {
+      total: cards.length,
+      available: cards.filter((c) => c.status === 'available').length,
+      connected: cards.filter((c) => c.status === 'connected').length,
+      expired: cards.filter((c) => c.status === 'expired').length,
+      disabled: cards.filter((c) => c.status === 'disabled').length,
+    }
+
+    return {
+      cards,
+      summary,
+      fetchedAt: new Date().toISOString(),
+    }
   })
 }
 
