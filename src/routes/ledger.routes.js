@@ -52,10 +52,41 @@ router.get('/statement', async (req, res) => {
   }
 })
 
+router.put('/vouchers/entry/:id', async (req, res) => {
+  try {
+    const { agentId, amount, date, notes } = req.body
+    if (!agentId) return res.status(400).json({ message: 'الوكيل مطلوب' })
+    const entry = await ledgerService.updateVoucher(+req.params.id, {
+      agentId: +agentId,
+      amount,
+      date,
+      notes,
+    })
+    res.json({ ok: true, entry })
+  } catch (error) {
+    res.status(400).json({ message: error.message || 'تعذر تعديل السند' })
+  }
+})
+
+router.delete('/vouchers/entry/:id', async (req, res) => {
+  try {
+    await ledgerService.deleteVoucher(+req.params.id)
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(400).json({ message: error.message || 'تعذر حذف السند' })
+  }
+})
+
 router.get('/vouchers/:type', async (req, res) => {
   try {
     const type = req.params.type === 'payment' ? 'سند صرف' : 'سند قبض'
-    const vouchers = await ledgerService.getRecentVouchers(type, req.query.limit)
+    const vouchers = await ledgerService.listVouchers({
+      type,
+      date: req.query.date || null,
+      allDates: req.query.allDates === '1' || req.query.allDates === 'true',
+      search: req.query.search || '',
+      limit: req.query.limit,
+    })
     res.json({ vouchers })
   } catch (error) {
     res.status(500).json({ message: 'تعذر جلب السندات' })

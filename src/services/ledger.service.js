@@ -193,14 +193,108 @@ export async function getAccountStatement({ agentId, fromDate, toDate }) {
   }
 }
 
-export async function getRecentVouchers(type, limit = 20) {
-  const { rows } = await query(
-    `SELECT id, \`date\`, agent_name, \`type\`, debit, credit, amount, balance, description
-     FROM ledger
-     WHERE \`type\` = $1
-     ORDER BY id DESC
-     LIMIT ${Math.min(Math.max(Number(limit) || 20, 1), 100)}`,
-    [type]
-  )
+export async function listVouchers({ type, date, allDates, search, limit = 200 }) {
+  const params = [type]
+  let sql = `
+    SELECT id, \`date\`, agent_id, agent_name, \`type\`, debit, credit, amount, balance, description
+    FROM ledger
+    WHERE \`type\` = $1`
+
+  if (!allDates && date) {
+    params.push(date)
+    sql += ` AND \`date\` = $${params.length}`
+  }
+
+  if (search?.trim()) {
+    const term = `%${search.trim()}%`
+    params.push(term, term, term, term)
+    const i = params.length
+    sql += ` AND (
+      CAST(id AS CHAR) LIKE $${i - 3}
+      OR agent_name LIKE $${i - 2}
+      OR description LIKE $${i - 1}
+      OR CAST(amount AS CHAR) LIKE $${i}
+    )`
+  }
+
+  const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500)
+  sql += ` ORDER BY \`date\` DESC, id DESC LIMIT ${safeLimit}`
+
+  const { rows } = await query(sql, params)
   return rows.map(mapEntry)
+}
+
+async function getVoucherById(id) {
+  const { rows } = await query(
+    `SELECT id, \`date\`, agent_id, agent_name, \`type\`, debit, credit, amount, balance, description
+     FROM ledger WHERE id = $1`,
+    [id]
+  )
+  const row = rows[0]
+  if (!row) throw new Error('السند غير موجود')
+  if (row.type !== 'سند قبض' && row.type !== 'سند صرف') {
+    throw new Error('لا يمكن تعديل هذا القيد')
+  }
+  return row
+}
+
+async function recalcAgentBalances(agentId) {
+  const { rows } = await query(
+    `SELECT id, debit, credit, amount, \`type\`
+     FROM ledger WHERE agent_id = $1 ORDER BY \`date\` ASC, id ASC`,
+    [agentId]
+  )
+
+  let balance = 0
+  for (const row of rows) {
+    const { debit, credit } = inferDebitCredit(row)
+    balance += credit - debit
+    await query('UPDATE ledger SET balance = $1 WHERE id = $2', [balance, row.id])
+  }
+
+  await query('UPDATE agents SET balance = $1 WHERE id = $2', [balance, agentId])
+  return balance
+}
+
+export async function updateVoucher(id, { agentId, amount, date, notes }) {
+  const existing = await getVoucherById(id)
+  const value = Number(amount)
+  if (!value || value <= 0) throw new Error('المبلغ غير صالح')
+
+  const agent = await getAgentRow(agentId)
+  const entryDate = date || existing.date
+  const description = notes?.trim() || (
+    existing.type === 'سند قبض'
+      ? `سند قبض — ${value.toLocaleString('ar-SA')} ر.س`
+      : `سند صرف — ${value.toLocaleString('ar-SA')} ر.س`
+  )
+
+  const debit = existing.type === 'سند صرف' ? value : 0
+  const credit = existing.type === 'سند قبض' ? value : 0
+
+  await query(
+    `UPDATE ledger
+     SET \`date\` = $1, agent_id = $2, agent_name = $3, amount = $4,
+         debit = $5, credit = $6, description = $7
+     WHERE id = $8`,
+    [entryDate, agentId, agent.name, value, debit, credit, String(description).slice(0, 500), id]
+  )
+
+  const agentsToRecalc = new Set([existing.agent_id, agentId])
+  for (const aid of agentsToRecalc) {
+    await recalcAgentBalances(aid)
+  }
+
+  return { id, agentId }
+}
+
+export async function deleteVoucher(id) {
+  const existing = await getVoucherById(id)
+  await query('DELETE FROM ledger WHERE id = $1', [id])
+  await recalcAgentBalances(existing.agent_id)
+  return { ok: true }
+}
+
+export async function getRecentVouchers(type, limit = 20) {
+  return listVouchers({ type, allDates: true, limit })
 }
