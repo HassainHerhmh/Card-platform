@@ -14,6 +14,7 @@ import errorsRoutes from './routes/errors.routes.js'
 import agentAuthRoutes from './routes/agent-auth.routes.js'
 import agentAppRoutes from './routes/agent-app.routes.js'
 import smsGatewayRoutes from './routes/sms-gateway.routes.js'
+import rechargeRoutes from './routes/recharge.routes.js'
 
 const app = express()
 
@@ -78,6 +79,7 @@ app.use('/api/ledger', ledgerRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/permissions', permissionsRoutes)
 app.use('/api/mikrotik', mikrotikRoutes)
+app.use('/api/recharge', rechargeRoutes)
 app.use('/api/errors', errorsRoutes)
 
 app.use((err, _req, res, _next) => {
