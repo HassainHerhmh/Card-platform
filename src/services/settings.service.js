@@ -19,8 +19,8 @@ export async function updateCardSettings({ digits, chars }) {
 
 function mapCategoryRow(row) {
   const routerSource = normalizeRouterSource(row.router_source)
-  const durationHours = Number(row.duration_hours ?? 24)
-  const durationMinutes = Number(row.duration_minutes ?? 0)
+  const durationHours = Number(row.durationHours ?? row.duration_hours ?? 24)
+  const durationMinutes = Number(row.durationMinutes ?? row.duration_minutes ?? 0)
   return {
     ...row,
     price: Number(row.price),

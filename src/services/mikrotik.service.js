@@ -364,13 +364,7 @@ async function fetchUserManagerSnapshot(api) {
     api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
   ])
 
-  const limitsByProfile = {}
-  for (const lim of limitationsRaw || []) {
-    const profileName = lim.profile
-    if (profileName && !limitsByProfile[profileName]) {
-      limitsByProfile[profileName] = lim
-    }
-  }
+  const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
 
   const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
   const users = (usersRaw || []).map(mapUserManagerUserRow)
@@ -384,6 +378,22 @@ async function fetchUserManagerSnapshot(api) {
     sessions: sessionsRaw || [],
     defaultCustomer,
   }
+}
+
+function indexProfileLimitations(limitationsRaw, profilesRaw) {
+  const limitsByProfile = {}
+  const idToName = {}
+  for (const p of profilesRaw || []) {
+    if (p.name) idToName[p.name] = p.name
+    if (p['.id']) idToName[p['.id']] = p.name
+  }
+  for (const lim of limitationsRaw || []) {
+    const profileKey = lim.profile
+    if (!profileKey) continue
+    const name = idToName[profileKey] || profileKey
+    if (!limitsByProfile[name]) limitsByProfile[name] = lim
+  }
+  return limitsByProfile
 }
 
 function mapUserManagerProfileRow(p, limitation) {
@@ -406,10 +416,7 @@ async function fetchUserManagerForCategorySync(api) {
     api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
   ])
 
-  const limitsByProfile = {}
-  for (const lim of limitationsRaw || []) {
-    if (lim.profile && !limitsByProfile[lim.profile]) limitsByProfile[lim.profile] = lim
-  }
+  const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
 
   const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
   const profiles = (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
@@ -453,10 +460,7 @@ export async function getUserManagerProfiles() {
       api.write('/tool/user-manager/profile/print'),
       api.write('/tool/user-manager/profile/profile-limitation/print').catch(() => []),
     ])
-    const limitsByProfile = {}
-    for (const lim of limitationsRaw || []) {
-      if (lim.profile && !limitsByProfile[lim.profile]) limitsByProfile[lim.profile] = lim
-    }
+    const limitsByProfile = indexProfileLimitations(limitationsRaw, profilesRaw)
     return (profilesRaw || []).map((p) => mapUserManagerProfileRow(p, limitsByProfile[p.name]))
   })
 }
@@ -464,12 +468,10 @@ export async function getUserManagerProfiles() {
 function umProfileDurationParts(profile) {
   const validity = parseValidityPeriod(profile.validity)
   const uptime = parseTimeHms(profile.uptimeLimit)
-  const hours = validity.hours || uptime?.hours || 24
-  const minutes = validity.hours ? validity.minutes : (uptime?.minutes || 0)
   return {
-    durationHours: hours,
-    durationMinutes: minutes,
-    duration: formatDurationLabel(hours, minutes),
+    durationHours: uptime?.hours ?? 0,
+    durationMinutes: uptime?.minutes ?? 0,
+    duration: formatDurationLabel(validity.hours, validity.minutes),
   }
 }
 
