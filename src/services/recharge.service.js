@@ -10,6 +10,7 @@ const emptyProvider = {
   password: '',
   token: '',
   employeeNote: '',
+  providerType: '',
 }
 
 function mapProvider(row) {
@@ -23,6 +24,7 @@ function mapProvider(row) {
     password: row.password || '',
     token: row.token || '',
     employeeNote: row.employee_note || '',
+    providerType: row.provider_type || '',
     updatedAt: row.updated_at,
   }
 }
@@ -62,6 +64,7 @@ function mapProviderRow(row, enabledServiceIds = []) {
     password: row.password || '',
     token: row.token || '',
     employeeNote: row.employee_note || '',
+    providerType: row.provider_type || '',
     status: row.status || 'نشط',
     enabledServiceIds,
     servicesCount: enabledServiceIds.length,
@@ -118,15 +121,16 @@ export async function createProvider(data) {
     password = '',
     token = '',
     employeeNote = '',
+    providerType = '',
     status = 'نشط',
     enabledServiceIds = [],
   } = data
 
   const { insertId } = await query(
     `INSERT INTO recharge_providers
-      (provider_name, api_url, api_ip, account_number, username, password, token, employee_note, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [providerName, apiUrl, apiIp, accountNumber, username, password, token, employeeNote, status]
+      (provider_name, api_url, api_ip, account_number, username, password, token, employee_note, provider_type, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [providerName, apiUrl, apiIp, accountNumber, username, password, token, employeeNote, providerType, status]
   )
 
   await setProviderServices(insertId, enabledServiceIds)
@@ -146,6 +150,7 @@ export async function updateProvider(id, data) {
     password = '',
     token = '',
     employeeNote = '',
+    providerType = '',
     status = 'نشط',
     enabledServiceIds,
   } = data
@@ -153,9 +158,9 @@ export async function updateProvider(id, data) {
   await query(
     `UPDATE recharge_providers SET
       provider_name = $1, api_url = $2, api_ip = $3, account_number = $4,
-      username = $5, password = $6, token = $7, employee_note = $8, status = $9
-     WHERE id = $10`,
-    [providerName, apiUrl, apiIp, accountNumber, username, password, token, employeeNote, status, id]
+      username = $5, password = $6, token = $7, employee_note = $8, provider_type = $9, status = $10
+     WHERE id = $11`,
+    [providerName, apiUrl, apiIp, accountNumber, username, password, token, employeeNote, providerType, status, id]
   )
 
   if (enabledServiceIds !== undefined) {

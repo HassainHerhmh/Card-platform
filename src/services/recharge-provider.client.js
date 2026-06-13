@@ -24,6 +24,9 @@ function buildBalanceRequest(provider, action) {
   const params = new URLSearchParams()
   params.set('action', action)
 
+  const providerType = String(provider.providerType || provider.provider_type || '').trim()
+  if (providerType) params.set('type', providerType)
+
   const userid = String(provider.username || provider.accountNumber || '').trim()
   if (userid) params.set('userid', userid)
   if (provider.password) params.set('password', provider.password)

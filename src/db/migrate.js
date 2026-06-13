@@ -31,6 +31,7 @@ export async function migrate() {
     'ALTER TABLE ledger ADD COLUMN description VARCHAR(500) NULL',
     'ALTER TABLE ledger ADD COLUMN reference_id INT NULL',
     'ALTER TABLE ledger ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP',
+    'ALTER TABLE recharge_providers ADD COLUMN provider_type VARCHAR(100) DEFAULT ""',
   ]
 
   for (const patch of patches) {
@@ -165,6 +166,7 @@ export async function migrate() {
       password VARCHAR(255) DEFAULT '',
       token VARCHAR(500) DEFAULT '',
       employee_note VARCHAR(255) DEFAULT '',
+      provider_type VARCHAR(100) DEFAULT '',
       status VARCHAR(20) NOT NULL DEFAULT 'نشط',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
