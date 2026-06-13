@@ -46,35 +46,40 @@ export async function createBatch({ categoryId, count, agentId }) {
   const settings = await getCardSettings()
   const status = agentName !== '-' ? 'معلق' : 'مطبوع'
 
-  const { insertId } = await query(
+  const { insertId: batchId } = await query(
     `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
      VALUES ($1, $2, $3, $4, $5, CURDATE())`,
     [category.id, category.name, agentDbId, agentName, count]
   )
 
-  const { rows: batchRows } = await query('SELECT * FROM batches WHERE id = $1', [insertId])
-  const batch = batchRows[0]
-  const cards = []
+  const codes = Array.from({ length: count }, () =>
+    generateCardCode({ digits: settings.digits, chars: settings.chars })
+  )
 
-  for (let i = 0; i < count; i += 1) {
-    const code = generateCardCode({ digits: settings.digits, chars: settings.chars })
-    const { insertId: cardId } = await query(
-      'INSERT INTO cards (batch_id, code, status) VALUES ($1, $2, $3)',
-      [batch.id, code, status]
+  const chunkSize = 100
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize)
+    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
+    const params = chunk.flatMap((code) => [batchId, code, status])
+    await query(
+      `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
+      params
     )
-    const { rows: cardRows } = await query('SELECT id, code, status FROM cards WHERE id = $1', [cardId])
-    cards.push(cardRows[0])
   }
 
   if (agentDbId) {
     await recordBatchDelivery({
       agentId: agentDbId,
-      batchId: batch.id,
+      batchId,
       categoryName: category.name,
       count,
       unitPrice: category.price,
     })
   }
+
+  const { rows: batchRows } = await query('SELECT * FROM batches WHERE id = $1', [batchId])
+  const batch = batchRows[0]
+  const cards = await getBatchCards(batchId)
 
   return {
     id: batch.id,
