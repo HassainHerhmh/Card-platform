@@ -6,6 +6,7 @@ import {
   getHotspotProfiles,
   getHotspotUsers,
   getCombinedInventory,
+  getInventoryCount,
   getUserManagerProfiles,
   getUserManagerCustomers,
   syncRouterCardsCount,
@@ -90,10 +91,23 @@ router.get('/profiles', async (_req, res) => {
   }
 })
 
+router.get('/inventory/count', async (req, res) => {
+  try {
+    const period = req.query.period || 'week'
+    const meta = await getInventoryCount(period)
+    res.json(meta)
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر عدّ كروت الفترة' })
+  }
+})
+
 router.get('/inventory', async (req, res) => {
   try {
     const period = req.query.period || 'week'
-    const inventory = await getCombinedInventory({ period })
+    const offset = req.query.offset != null ? Number(req.query.offset) : 0
+    const limit = req.query.limit != null ? Number(req.query.limit) : undefined
+    const inventory = await getCombinedInventory({ period, offset, limit })
     res.json(inventory)
   } catch (error) {
     console.error(error)

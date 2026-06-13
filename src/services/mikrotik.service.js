@@ -817,8 +817,33 @@ function periodSqlWhere(period) {
   return 'b.printed_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)'
 }
 
-async function getPrintedCardsForPeriod(period) {
+async function countPrintedCardsForPeriod(period) {
   const normalized = normalizeInventoryPeriod(period)
+  const { rows } = await query(
+    `SELECT COUNT(*) AS cnt
+     FROM cards c
+     INNER JOIN batches b ON b.id = c.batch_id
+     WHERE ${periodSqlWhere(normalized)}`
+  )
+  const dbTotal = Number(rows[0]?.cnt) || 0
+  const cap = 10000
+  return {
+    total: Math.min(dbTotal, cap),
+    dbTotal,
+    truncated: dbTotal > cap,
+    period: normalized,
+    periodLabel: periodLabelAr(normalized),
+  }
+}
+
+export async function getInventoryCount(period) {
+  return countPrintedCardsForPeriod(period)
+}
+
+async function getPrintedCardsForPeriod(period, { offset = 0, limit = 10000 } = {}) {
+  const normalized = normalizeInventoryPeriod(period)
+  const safeOffset = Math.max(0, Number(offset) || 0)
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 10000))
   const { rows } = await query(
     `SELECT c.code, c.status AS dbStatus, b.category_name AS categoryName,
             b.printed_at AS printedAt, b.router_source AS routerSource,
@@ -828,9 +853,30 @@ async function getPrintedCardsForPeriod(period) {
      LEFT JOIN categories cat ON cat.id = b.category_id
      WHERE ${periodSqlWhere(normalized)}
      ORDER BY b.printed_at DESC, c.id DESC
-     LIMIT 10000`
+     LIMIT ${safeLimit} OFFSET ${safeOffset}`
   )
-  return { rows, period: normalized, truncated: rows.length >= 10000 }
+  const countMeta = await countPrintedCardsForPeriod(normalized)
+  return {
+    rows,
+    period: normalized,
+    truncated: countMeta.truncated,
+    total: countMeta.total,
+    offset: safeOffset,
+    limit: safeLimit,
+  }
+}
+
+function computeInventorySummary(cards) {
+  return {
+    total: cards.length,
+    available: cards.filter((c) => c.status === 'available').length,
+    connected: cards.filter((c) => c.status === 'connected').length,
+    expired: cards.filter((c) => c.status === 'expired').length,
+    disabled: cards.filter((c) => c.status === 'disabled').length,
+    missing: cards.filter((c) => c.status === 'missing').length,
+    hotspot: cards.filter((c) => c.source === ROUTER_SOURCE.HOTSPOT).length,
+    userManager: cards.filter((c) => c.source === ROUTER_SOURCE.USER_MANAGER).length,
+  }
 }
 
 async function fetchHotspotUsersIndexed(api, codeSet) {
@@ -864,6 +910,76 @@ async function fetchHotspotUsersIndexed(api, codeSet) {
   }
 
   return { byName, activeUsernames, activeSessions: activeSessions || [] }
+}
+
+async function enrichDbRowsWithRouter(dbRows) {
+  if (!dbRows.length) {
+    return {
+      cards: [],
+      sources: { hotspot: false, userManager: false },
+      userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+    }
+  }
+
+  const codesBySource = { hotspot: new Set(), 'user-manager': new Set() }
+  for (const row of dbRows) {
+    const source = normalizeRouterSource(row.routerSource)
+    codesBySource[source === ROUTER_SOURCE.USER_MANAGER ? 'user-manager' : 'hotspot'].add(row.code)
+  }
+
+  let hotspotIndex = { byName: new Map(), activeUsernames: new Set(), activeSessions: [] }
+  let umIndex = { byName: new Map(), activeUsernames: new Set(), sessions: [] }
+  let userManagerAvailable = true
+  let hotspotOk = false
+  let umOk = false
+
+  await withConnection(async (api) => {
+    if (codesBySource.hotspot.size > 0) {
+      hotspotIndex = await fetchHotspotUsersIndexed(api, codesBySource.hotspot)
+      hotspotOk = true
+    }
+    if (codesBySource['user-manager'].size > 0) {
+      try {
+        umIndex = await fetchUserManagerUsersIndexed(api, codesBySource['user-manager'])
+        umOk = true
+      } catch (error) {
+        if (isUserManagerUnavailable(error)) userManagerAvailable = false
+        else throw error
+      }
+    }
+  })
+
+  const cards = dbRows.map((dbRow) => {
+    const source = normalizeRouterSource(dbRow.routerSource)
+    const cardWithDate = { printedAt: dbRow.printedAt, dbStatus: dbRow.dbStatus }
+
+    if (source === ROUTER_SOURCE.USER_MANAGER) {
+      const row = umIndex.byName.get(dbRow.code)
+      if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
+      return { ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate }
+    }
+
+    const row = hotspotIndex.byName.get(dbRow.code)
+    if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
+    return {
+      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
+      ...cardWithDate,
+    }
+  })
+
+  return {
+    cards,
+    sources: {
+      hotspot: hotspotOk || codesBySource.hotspot.size === 0,
+      userManager: userManagerAvailable && (umOk || codesBySource['user-manager'].size === 0),
+    },
+    userManager: {
+      available: userManagerAvailable,
+      customers: [],
+      defaultCustomer: null,
+      profiles: 0,
+    },
+  }
 }
 
 async function fetchUserManagerUsersIndexed(api, codeSet) {
@@ -957,112 +1073,47 @@ function buildMissingInventoryCard(dbRow) {
 
 export async function getCombinedInventory(options = {}) {
   const period = normalizeInventoryPeriod(options.period)
-  const { rows: dbRows, truncated } = await getPrintedCardsForPeriod(period)
+  const offset = Math.max(0, Number(options.offset) || 0)
+  const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
+
+  const { rows: dbRows, truncated, total, period: normalizedPeriod } = await getPrintedCardsForPeriod(
+    period,
+    { offset, limit: limit > 10000 ? 10000 : limit }
+  )
 
   if (!dbRows.length) {
     return {
       cards: [],
-      summary: {
-        total: 0,
-        available: 0,
-        connected: 0,
-        expired: 0,
-        disabled: 0,
-        missing: 0,
-        hotspot: 0,
-        userManager: 0,
-      },
-      period,
-      periodLabel: periodLabelAr(period),
-      truncated: false,
+      summary: computeInventorySummary([]),
+      period: normalizedPeriod,
+      periodLabel: periodLabelAr(normalizedPeriod),
+      truncated: Boolean(truncated),
+      progress: { loaded: offset, total: total || 0, percent: total ? Math.round((offset / total) * 100) : 100 },
       sources: { hotspot: false, userManager: false },
       userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
       fetchedAt: new Date().toISOString(),
     }
   }
 
-  const codeSet = new Set(dbRows.map((r) => r.code))
-  const codesBySource = { hotspot: new Set(), 'user-manager': new Set() }
-  for (const row of dbRows) {
-    const source = normalizeRouterSource(row.routerSource)
-    codesBySource[source === ROUTER_SOURCE.USER_MANAGER ? 'user-manager' : 'hotspot'].add(row.code)
-  }
-
-  let hotspotIndex = { byName: new Map(), activeUsernames: new Set(), activeSessions: [] }
-  let umIndex = { byName: new Map(), activeUsernames: new Set(), sessions: [] }
-  let userManagerAvailable = true
-  let hotspotOk = false
-  let umOk = false
-
   try {
-    await withConnection(async (api) => {
-      if (codesBySource.hotspot.size > 0) {
-        hotspotIndex = await fetchHotspotUsersIndexed(api, codesBySource.hotspot)
-        hotspotOk = true
-      }
-      if (codesBySource['user-manager'].size > 0) {
-        try {
-          umIndex = await fetchUserManagerUsersIndexed(api, codesBySource['user-manager'])
-          umOk = true
-        } catch (error) {
-          if (isUserManagerUnavailable(error)) userManagerAvailable = false
-          else throw error
-        }
-      }
-    })
+    const enriched = await enrichDbRowsWithRouter(dbRows)
+    const loaded = Math.min(offset + enriched.cards.length, total || offset + enriched.cards.length)
+    const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 100
+
+    return {
+      cards: enriched.cards,
+      summary: computeInventorySummary(enriched.cards),
+      period: normalizedPeriod,
+      periodLabel: periodLabelAr(normalizedPeriod),
+      truncated: Boolean(truncated),
+      progress: { loaded, total: total || loaded, percent },
+      sources: enriched.sources,
+      userManager: enriched.userManager,
+      fetchedAt: new Date().toISOString(),
+    }
   } catch (error) {
     console.warn('[mikrotik] inventory period fetch failed:', error.message)
     throw error
-  }
-
-  const cards = dbRows.map((dbRow) => {
-    const source = normalizeRouterSource(dbRow.routerSource)
-    const cardWithDate = { printedAt: dbRow.printedAt, dbStatus: dbRow.dbStatus }
-
-    if (source === ROUTER_SOURCE.USER_MANAGER) {
-      const row = umIndex.byName.get(dbRow.code)
-      if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
-      return { ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate }
-    }
-
-    const row = hotspotIndex.byName.get(dbRow.code)
-    if (!row) return { ...buildMissingInventoryCard(dbRow), ...cardWithDate }
-    return {
-      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
-      ...cardWithDate,
-    }
-  })
-
-  cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
-
-  const summary = {
-    total: cards.length,
-    available: cards.filter((c) => c.status === 'available').length,
-    connected: cards.filter((c) => c.status === 'connected').length,
-    expired: cards.filter((c) => c.status === 'expired').length,
-    disabled: cards.filter((c) => c.status === 'disabled').length,
-    missing: cards.filter((c) => c.status === 'missing').length,
-    hotspot: cards.filter((c) => c.source === ROUTER_SOURCE.HOTSPOT).length,
-    userManager: cards.filter((c) => c.source === ROUTER_SOURCE.USER_MANAGER).length,
-  }
-
-  return {
-    cards,
-    summary,
-    period,
-    periodLabel: periodLabelAr(period),
-    truncated,
-    sources: {
-      hotspot: hotspotOk || codesBySource.hotspot.size === 0,
-      userManager: userManagerAvailable && (umOk || codesBySource['user-manager'].size === 0),
-    },
-    userManager: {
-      available: userManagerAvailable,
-      customers: [],
-      defaultCustomer: null,
-      profiles: 0,
-    },
-    fetchedAt: new Date().toISOString(),
   }
 }
 
