@@ -1,5 +1,6 @@
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
+import { recordCardSale } from './ledger.service.js'
 
 const GATEWAY_ONLINE_SECONDS = 30
 const SMS_SERVICE_UNAVAILABLE =
@@ -115,18 +116,14 @@ export async function processAgentCharge({
 
   await query('UPDATE cards SET status = $1 WHERE id = $2', ['مباع', card.cardId])
 
-  const newBalance = balance - price
-  const cardsSold = (agent.cardsSold ?? 0) + 1
-  await query(
-    'UPDATE agents SET balance = $1, cards_sold = $2 WHERE id = $3',
-    [newBalance, cardsSold, agentId]
-  )
-
-  await query(
-    `INSERT INTO ledger (\`date\`, agent_id, agent_name, \`type\`, cards, amount, balance)
-     VALUES (CURDATE(), $1, $2, 'بيع', 1, $3, $4)`,
-    [agentId, agent.name, price, newBalance]
-  )
+  const { balance: newBalance } = await recordCardSale({
+    agentId,
+    agentName: agent.name,
+    price,
+    categoryName: card.categoryName,
+    cardCode: card.cardCode,
+    networkName,
+  })
 
   let smsQueueId = null
   if (sendSms) {

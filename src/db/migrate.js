@@ -26,6 +26,10 @@ export async function migrate() {
     'ALTER TABLE agents ADD COLUMN address VARCHAR(500) NULL',
     'ALTER TABLE agents ADD COLUMN password_hash VARCHAR(255) NULL',
     "ALTER TABLE categories ADD COLUMN data_quota VARCHAR(100) NOT NULL DEFAULT '1 جيجا'",
+    'ALTER TABLE ledger ADD COLUMN debit DECIMAL(12, 2) NOT NULL DEFAULT 0',
+    'ALTER TABLE ledger ADD COLUMN credit DECIMAL(12, 2) NOT NULL DEFAULT 0',
+    'ALTER TABLE ledger ADD COLUMN description VARCHAR(500) NULL',
+    'ALTER TABLE ledger ADD COLUMN reference_id INT NULL',
   ]
 
   for (const patch of patches) {

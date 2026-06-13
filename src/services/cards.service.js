@@ -1,4 +1,5 @@
 import { query } from '../db/pool.js'
+import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
 import { getCardSettings } from './settings.service.js'
 
@@ -68,6 +69,16 @@ export async function createBatch({ categoryId, count, agentId }) {
     )
     const { rows: cardRows } = await query('SELECT id, code, status FROM cards WHERE id = $1', [cardId])
     cards.push(cardRows[0])
+  }
+
+  if (agentDbId) {
+    await recordBatchDelivery({
+      agentId: agentDbId,
+      batchId: batch.id,
+      categoryName: category.name,
+      count,
+      unitPrice: category.price,
+    })
   }
 
   return {

@@ -63,7 +63,12 @@ CREATE TABLE IF NOT EXISTS ledger (
   `type` VARCHAR(50) NOT NULL,
   cards INT DEFAULT 0,
   amount DECIMAL(12, 2) NOT NULL,
-  balance DECIMAL(12, 2) NOT NULL
+  balance DECIMAL(12, 2) NOT NULL,
+  debit DECIMAL(12, 2) NOT NULL DEFAULT 0,
+  credit DECIMAL(12, 2) NOT NULL DEFAULT 0,
+  description VARCHAR(500),
+  reference_id INT NULL,
+  INDEX idx_ledger_agent_date (agent_id, `date`)
 );
 
 CREATE TABLE IF NOT EXISTS mikrotik_routers (
