@@ -266,10 +266,14 @@ export async function getHotspotUsers() {
 function mapHotspotUserRow(u) {
   return {
     id: u['.id'],
+    serialNumber: extractRouterSerial(u),
     name: u.name || '',
     password: u.password || '',
     profile: u.profile || '',
+    packageLabel: u.profile || '',
     comment: u.comment || '',
+    location: u.comment || '',
+    pointOfSale: u.comment || '',
     disabled: u.disabled === 'true',
     uptime: u.uptime || '',
     limitUptime: u['limit-uptime'] || '',
@@ -277,6 +281,7 @@ function mapHotspotUserRow(u) {
     limitBytesOut: u['limit-bytes-out'] || '',
     bytesIn: u['bytes-in'] || '',
     bytesOut: u['bytes-out'] || '',
+    lastSeen: u['last-logged-out'] || u['last-logged-in'] || '',
   }
 }
 
@@ -755,16 +760,74 @@ export async function getUserManagerUsers() {
 function mapUserManagerUserRow(u) {
   return {
     id: u['.id'],
+    serialNumber: extractRouterSerial(u),
     name: u.username || u.name || '',
     password: u.password || '',
     profile: u['actual-profile'] || u.profile || '',
-    comment: u.comment || u.location || '',
+    packageLabel: u['actual-profile'] || u.profile || '',
+    comment: u.comment || '',
+    location: u.location || '',
+    pointOfSale: u.location || u.comment || '',
     disabled: u.disabled === 'true',
     uptime: u['uptime-used'] || '',
     limitUptime: u['uptime-limit'] || '',
     bytesIn: u['download-used'] || '',
     bytesOut: u['upload-used'] || '',
+    lastSeen: u['last-seen'] || '',
+    registrationDate: u['registration-date'] || '',
     customer: u.customer || '',
+  }
+}
+
+function extractRouterSerial(u) {
+  const regKey = u['reg-key']
+  if (regKey != null && regKey !== '') return String(regKey)
+  const id = u['.id']
+  if (id != null && id !== '') return String(id).replace(/^\*/, '')
+  return ''
+}
+
+function formatTrafficAmount(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return '0.00'
+  if (n >= 1073741824) return `${(n / 1073741824).toFixed(2)} جيجا`
+  if (n >= 1048576) return `${(n / 1048576).toFixed(2)} ميجا`
+  if (n >= 1024) return `${(n / 1024).toFixed(2)} ك.ب`
+  return `${n.toFixed(2)} بايت`
+}
+
+function formatTotalTraffic(bytesIn, bytesOut) {
+  const total = Number(bytesIn || 0) + Number(bytesOut || 0)
+  if (total <= 0) return '0.00'
+  return formatTrafficAmount(total)
+}
+
+function formatUptimeDisplay(value) {
+  if (value == null || value === '' || value === '0' || value === '0s') return '0'
+  return String(value).trim()
+}
+
+function formatLastSeen(value) {
+  if (value == null || value === '' || String(value).toLowerCase() === 'never') return 'never'
+  return String(value).trim()
+}
+
+function finishInventoryCard(card, extras = {}) {
+  const bytesIn = Number(card.bytesIn || 0)
+  const bytesOut = Number(card.bytesOut || 0)
+  const usedTime = formatUptimeDisplay(card.uptime || card.sessionUptime)
+  return {
+    ...card,
+    ...extras,
+    serialNumber: extras.serialNumber || card.serialNumber || '',
+    packageLabel: card.packageLabel || card.profile || extras.categoryName || '',
+    pointOfSale: extras.pointOfSale || card.pointOfSale || card.location || '',
+    usedTime,
+    totalTraffic: formatTotalTraffic(bytesIn, bytesOut),
+    downloadUsed: formatTrafficAmount(bytesIn),
+    uploadUsed: formatTrafficAmount(bytesOut),
+    lastSeen: formatLastSeen(extras.lastSeen ?? card.lastSeen),
+    password: card.password || '',
   }
 }
 
@@ -993,9 +1056,11 @@ let routerInventoryCacheAt = 0
 let routerInventoryBuildPromise = null
 const ROUTER_INVENTORY_CACHE_MS = 300_000
 
-const HS_USER_PROPS = ['=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime']
+const HS_USER_PROPS = [
+  '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,password,last-logged-out,last-logged-in',
+]
 const UM_USER_PROPS = [
-  '=.proplist=username,name,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,comment,location,customer',
+  '=.proplist=username,name,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,customer,last-seen,registration-date,reg-key',
 ]
 
 async function buildRouterInventorySnapshot(api) {
@@ -1118,12 +1183,14 @@ async function getPrintedCardsForPeriod(filterOptions = {}, { offset = 0, limit 
   const safeOffset = Math.max(0, Number(offset) || 0)
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 10000))
   const { rows } = await query(
-    `SELECT c.code, c.status AS dbStatus, b.category_name AS categoryName,
+    `SELECT c.id AS cardId, c.code, c.status AS dbStatus, b.category_name AS categoryName,
             b.printed_at AS printedAt, b.router_source AS routerSource,
-            COALESCE(cat.router_profile, b.category_name) AS profile
+            COALESCE(cat.router_profile, b.category_name) AS profile,
+            a.name AS agentName
      FROM cards c
      INNER JOIN batches b ON b.id = c.batch_id
      LEFT JOIN categories cat ON cat.id = b.category_id
+     LEFT JOIN agents a ON a.id = b.agent_id
      WHERE ${clause}
      ORDER BY b.printed_at DESC, c.id DESC
      LIMIT ${safeLimit} OFFSET ${safeOffset}`,
@@ -1190,13 +1257,18 @@ async function fetchHotspotUsersIndexed(api, codeSet) {
 
 function mapDbRowToPlaceholderCard(dbRow, statusLabel = 'جاري التحقق من الراوتر...') {
   const source = normalizeRouterSource(dbRow.routerSource)
-  return {
+  return finishInventoryCard({
     id: dbRow.code,
+    serialNumber: dbRow.cardId != null ? String(dbRow.cardId) : '',
     name: dbRow.code,
     profile: dbRow.profile || dbRow.categoryName,
     comment: dbRow.categoryName,
+    password: '',
     disabled: false,
     uptime: '',
+    bytesIn: '',
+    bytesOut: '',
+    lastSeen: '',
     status: 'pending',
     statusLabel,
     connectedIp: '',
@@ -1206,7 +1278,10 @@ function mapDbRowToPlaceholderCard(dbRow, statusLabel = 'جاري التحقق �
     source,
     sourceLabel: routerSourceLabel(source),
     sourceLabelAr: routerSourceLabelAr(source),
-  }
+  }, {
+    pointOfSale: dbRow.agentName || '',
+    packageLabel: dbRow.profile || dbRow.categoryName || '',
+  })
 }
 
 const ROUTER_ENRICH_TIMEOUT_MS = 20000
@@ -1310,7 +1385,12 @@ async function enrichDbRowsWithRouter(dbRows) {
 
   for (const dbRow of dbRows) {
     const source = normalizeRouterSource(dbRow.routerSource)
-    const cardWithDate = { printedAt: dbRow.printedAt, dbStatus: dbRow.dbStatus }
+    const cardWithDate = {
+      printedAt: dbRow.printedAt,
+      dbStatus: dbRow.dbStatus,
+      serialNumber: dbRow.cardId != null ? String(dbRow.cardId) : undefined,
+      pointOfSale: dbRow.agentName || undefined,
+    }
 
     if (source === ROUTER_SOURCE.USER_MANAGER) {
       const row = umIndex.byName.get(dbRow.code)
@@ -1411,7 +1491,7 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
 function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
   const { status, label } = resolveCardStatus(row, activeUsernames)
   const activeSession = activeSessions.find((s) => s.user === row.name)
-  return {
+  return finishInventoryCard({
     ...row,
     status,
     statusLabel: label,
@@ -1420,13 +1500,13 @@ function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
     source: ROUTER_SOURCE.HOTSPOT,
     sourceLabel: routerSourceLabel(ROUTER_SOURCE.HOTSPOT),
     sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
-  }
+  })
 }
 
 function buildUserManagerInventoryCard(row, activeUsernames, sessions) {
   const { status, label } = resolveUserManagerCardStatus(row, activeUsernames)
   const activeSession = sessions.find((s) => (s.user || s.username) === row.name)
-  return {
+  return finishInventoryCard({
     ...row,
     status,
     statusLabel: label,
@@ -1435,7 +1515,7 @@ function buildUserManagerInventoryCard(row, activeUsernames, sessions) {
     source: ROUTER_SOURCE.USER_MANAGER,
     sourceLabel: routerSourceLabel(ROUTER_SOURCE.USER_MANAGER),
     sourceLabelAr: routerSourceLabelAr(ROUTER_SOURCE.USER_MANAGER),
-  }
+  })
 }
 
 function buildMissingInventoryCard(dbRow) {
