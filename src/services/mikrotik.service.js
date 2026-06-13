@@ -64,6 +64,33 @@ async function withConnection(fn) {
   }
 }
 
+async function withInventoryConnection(fn) {
+  const cfg = getConnectionConfig()
+  if (!cfg.host || !cfg.user || !cfg.password) {
+    throw new Error('إعدادات الميكروتك غير مكتملة في ملف .env على السيرفر')
+  }
+
+  const api = new RouterOSAPI({
+    host: cfg.host,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    timeout: env.mikrotik.inventoryTimeout,
+    tls: cfg.tls,
+  })
+
+  try {
+    await api.connect()
+    return await fn(api, cfg)
+  } finally {
+    try {
+      api.close()
+    } catch {
+      // ignore close errors
+    }
+  }
+}
+
 function mapConnectionError(error) {
   const msg = error?.message || String(error)
   if (/timeout|ETIMEDOUT/i.test(msg)) {
@@ -741,11 +768,33 @@ function mapUserManagerUserRow(u) {
   }
 }
 
-function hasUserManagerUsage(user) {
-  const uptime = user.uptime || ''
-  const bytesIn = Number(user.bytesIn || 0)
-  const bytesOut = Number(user.bytesOut || 0)
-  return Boolean(uptime && uptime !== '0s') || bytesIn > 0 || bytesOut > 0
+function parseUsageSeconds(value) {
+  const hms = parseTimeHms(String(value || ''))
+  if (hms) return hms.hours * 3600 + hms.minutes * 60
+  const parsed = parseRosTime(value)
+  if (!parsed) return 0
+  return parsed.hours * 3600 + parsed.minutes * 60
+}
+
+function resolveUserManagerCardStatus(user, activeUsernames) {
+  if (user.disabled) {
+    return { status: 'disabled', label: 'معطّل' }
+  }
+  if (activeUsernames.has(user.name)) {
+    return { status: 'connected', label: 'متصل الآن' }
+  }
+
+  const usedSec = parseUsageSeconds(user.uptime)
+  const limitSec = parseUsageSeconds(user.limitUptime)
+  const hasBytes = Number(user.bytesIn || 0) > 0 || Number(user.bytesOut || 0) > 0
+
+  if (limitSec > 0 && usedSec >= limitSec) {
+    return { status: 'expired', label: 'انتهى الرصيد' }
+  }
+  if (usedSec > 0 || hasBytes) {
+    return { status: 'active', label: 'نشط' }
+  }
+  return { status: 'available', label: 'انتظار' }
 }
 
 export async function getUserManagerInventory() {
@@ -757,7 +806,7 @@ export async function getUserManagerInventory() {
     )
 
     const cards = um.users.map((row) => {
-      const { status, label } = resolveCardStatus(row, activeUsernames, hasUserManagerUsage)
+      const { status, label } = resolveUserManagerCardStatus(row, activeUsernames)
       const activeSession = um.sessions.find(
         (s) => (s.user || s.username) === row.name
       )
@@ -888,7 +937,7 @@ async function countPrintedCardsForPeriod(filterOptions = {}) {
 function normalizeInventoryCardFilters(options = {}) {
   const status = String(options.status || 'all').trim()
   const source = String(options.source || 'all').trim()
-  const validStatuses = new Set(['available', 'connected', 'expired', 'disabled', 'missing', 'pending'])
+  const validStatuses = new Set(['available', 'active', 'connected', 'expired', 'disabled', 'missing', 'pending'])
   return {
     status: validStatuses.has(status) ? status : null,
     source: source === 'hotspot' || source === 'user-manager' ? source : null,
@@ -941,12 +990,23 @@ export async function getInventoryCount(filterOptions = {}) {
 
 let routerInventoryCache = null
 let routerInventoryCacheAt = 0
-const ROUTER_INVENTORY_CACHE_MS = 120_000
+let routerInventoryBuildPromise = null
+const ROUTER_INVENTORY_CACHE_MS = 300_000
+
+const HS_USER_PROPS = ['=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime']
+const UM_USER_PROPS = [
+  '=.proplist=username,name,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,comment,location,customer',
+]
 
 async function buildRouterInventorySnapshot(api) {
-  const [hotspotUsersRaw, activeHotspotSessions] = await Promise.all([
-    api.write('/ip/hotspot/user/print'),
-    api.write('/ip/hotspot/active/print').catch(() => []),
+  const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw] = await Promise.all([
+    api.write('/ip/hotspot/user/print', HS_USER_PROPS),
+    api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
+    api.write('/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
+      if (isUserManagerUnavailable(error)) return []
+      throw error
+    }),
+    api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
   ])
 
   const activeHotspotUsernames = new Set(
@@ -958,37 +1018,27 @@ async function buildRouterInventorySnapshot(api) {
     return buildHotspotInventoryCard(row, activeHotspotUsernames, activeHotspotSessions || [])
   })
 
-  let umCards = []
-  let userManagerMeta = {
-    available: false,
+  const umSessions = umSessionsRaw || []
+  const activeUmUsernames = new Set(
+    umSessions.map((s) => s.user || s.username).filter(Boolean)
+  )
+
+  const umCards = (umUsersRaw || []).map((u) => {
+    const row = mapUserManagerUserRow(u)
+    return buildUserManagerInventoryCard(row, activeUmUsernames, umSessions)
+  })
+
+  const userManagerMeta = {
+    available: umUsersRaw != null && (umUsersRaw.length > 0 || umSessions.length > 0),
     customers: [],
     defaultCustomer: null,
     profiles: 0,
   }
 
-  try {
-    const um = await fetchUserManagerSnapshot(api)
-    const activeUmUsernames = new Set(
-      um.sessions.map((s) => s.user || s.username).filter(Boolean)
-    )
-    umCards = um.users.map((row) =>
-      buildUserManagerInventoryCard(row, activeUmUsernames, um.sessions)
-    )
-    userManagerMeta = {
-      available: true,
-      customers: um.customers.map((c) => ({
-        login: customerLogin(c),
-        name: c.name,
-      })),
-      defaultCustomer: um.defaultCustomer,
-      profiles: um.profiles.length,
-    }
-  } catch (error) {
-    if (!isUserManagerUnavailable(error)) throw error
-  }
-
   const cards = [...hotspotCards, ...umCards]
   cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  console.info(`[mikrotik] router inventory snapshot: ${cards.length} cards (HS ${hotspotCards.length}, UM ${umCards.length})`)
 
   return {
     cards,
@@ -1008,10 +1058,21 @@ async function getCachedRouterInventory() {
     return routerInventoryCache
   }
 
-  const snapshot = await withConnection((api) => buildRouterInventorySnapshot(api))
-  routerInventoryCache = snapshot
-  routerInventoryCacheAt = now
-  return snapshot
+  if (routerInventoryBuildPromise) {
+    return routerInventoryBuildPromise
+  }
+
+  routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
+    .then((snapshot) => {
+      routerInventoryCache = snapshot
+      routerInventoryCacheAt = Date.now()
+      return snapshot
+    })
+    .finally(() => {
+      routerInventoryBuildPromise = null
+    })
+
+  return routerInventoryBuildPromise
 }
 
 async function getFilteredRouterInventory(filterOptions = {}) {
@@ -1084,6 +1145,7 @@ function computeInventorySummary(cards) {
   return {
     total: cards.length,
     available: cards.filter((c) => c.status === 'available').length,
+    active: cards.filter((c) => c.status === 'active').length,
     connected: cards.filter((c) => c.status === 'connected').length,
     expired: cards.filter((c) => c.status === 'expired').length,
     disabled: cards.filter((c) => c.status === 'disabled').length,
@@ -1362,7 +1424,7 @@ function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
 }
 
 function buildUserManagerInventoryCard(row, activeUsernames, sessions) {
-  const { status, label } = resolveCardStatus(row, activeUsernames, hasUserManagerUsage)
+  const { status, label } = resolveUserManagerCardStatus(row, activeUsernames)
   const activeSession = sessions.find((s) => (s.user || s.username) === row.name)
   return {
     ...row,

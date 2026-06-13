@@ -40,6 +40,8 @@ export const env = {
     user: process.env.MIKROTIK_USER || '',
     password: process.env.MIKROTIK_PASSWORD || '',
     useTls: process.env.MIKROTIK_USE_TLS === 'true',
+    /** مهلة جلب مخزون الراوتر الكامل (ثوانٍ) — افتراضي 3 دقائق لراوترات كبيرة */
+    inventoryTimeout: Number(process.env.MIKROTIK_INVENTORY_TIMEOUT) || 180,
     /** اختياري — يُستخدم فقط إذا أردت تجاوز العميل المكتشف من الراوتر */
     userManagerCustomerOverride: process.env.MIKROTIK_UM_CUSTOMER || '',
   },
