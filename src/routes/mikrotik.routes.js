@@ -5,6 +5,7 @@ import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
+  printHotspotUsers,
   syncRouterCardsCount,
   syncAllFromRouter,
 } from '../services/mikrotik.service.js'
@@ -34,6 +35,7 @@ router.get('/routers', async (_req, res) => {
           version: status.version,
           boardName: status.boardName,
           hotspotUsers: liveCount,
+          activeHotspotUsers: status.activeHotspotUsers ?? 0,
           cardsPrinted: liveCount,
         }]
       : status.host
@@ -46,6 +48,7 @@ router.get('/routers', async (_req, res) => {
             version: status.version,
             boardName: status.boardName,
             hotspotUsers: liveCount,
+            activeHotspotUsers: status.activeHotspotUsers ?? 0,
           }]
         : []
 
@@ -107,7 +110,6 @@ router.post('/sync-categories', async (_req, res) => {
       deletedManual: result.categories.deletedManual,
       deletedStale: result.categories.deletedStale,
       cardSettings: result.cardSettings,
-      readOnly: true,
     })
   } catch (error) {
     console.error(error)
@@ -115,11 +117,19 @@ router.post('/sync-categories', async (_req, res) => {
   }
 })
 
-router.post('/print', async (_req, res) => {
-  res.status(403).json({
-    message: 'الطباعة معطّلة حالياً — نجلب البيانات من الراوتر فقط دون تعديل إعداداته',
-    readOnly: true,
-  })
+router.post('/print', async (req, res) => {
+  try {
+    const { category, profile, count } = req.body
+    const profileName = profile || category
+    if (!profileName || !count) {
+      return res.status(400).json({ message: 'الفئة وعدد الكروت مطلوبان' })
+    }
+    const result = await printHotspotUsers({ profile: profileName, count: Number(count) })
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: error.message || 'تعذر الطباعة من الميكروتك' })
+  }
 })
 
 export default router

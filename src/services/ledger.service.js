@@ -1,5 +1,6 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
+import { formatCurrency } from '../constants/currency.js'
 
 async function getAgentRow(agentId) {
   const { rows } = await query(
@@ -91,7 +92,7 @@ export async function recordBatchDelivery({ agentId, batchId, categoryName, coun
     type: 'تسليم كروت',
     cards: count,
     debit: total,
-    description: `تسليم ${count} كرت — ${categoryName} — ${total.toLocaleString('ar-SA')} ر.س`,
+    description: `تسليم ${count} كرت — ${categoryName} — ${formatCurrency(total)}`,
     referenceId: batchId,
   })
 }
@@ -128,7 +129,7 @@ export async function createReceiptVoucher({ agentId, amount, date, notes }) {
     type: 'سند قبض',
     credit: value,
     date,
-    description: notes?.trim() || `سند قبض — ${value.toLocaleString('ar-SA')} ر.س`,
+    description: notes?.trim() || `سند قبض — ${formatCurrency(value)}`,
   })
 }
 
@@ -146,7 +147,7 @@ export async function createPaymentVoucher({ agentId, amount, date, notes }) {
     type: 'سند صرف',
     debit: value,
     date,
-    description: notes?.trim() || `سند صرف — ${value.toLocaleString('ar-SA')} ر.س`,
+    description: notes?.trim() || `سند صرف — ${formatCurrency(value)}`,
   })
 }
 
@@ -265,8 +266,8 @@ export async function updateVoucher(id, { agentId, amount, date, notes }) {
   const entryDate = date || existing.date
   const description = notes?.trim() || (
     existing.type === 'سند قبض'
-      ? `سند قبض — ${value.toLocaleString('ar-SA')} ر.س`
-      : `سند صرف — ${value.toLocaleString('ar-SA')} ر.س`
+      ? `سند قبض — ${formatCurrency(value)}`
+      : `سند صرف — ${formatCurrency(value)}`
   )
 
   const debit = existing.type === 'سند صرف' ? value : 0

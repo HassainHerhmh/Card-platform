@@ -90,3 +90,43 @@ export async function createBatch({ categoryId, count, agentId }) {
     cards,
   }
 }
+
+export async function createBatchFromRouterPrint({ profileName, codes }) {
+  if (!codes?.length) return null
+
+  const { rows: catRows } = await query(
+    'SELECT * FROM categories WHERE router_profile = $1 OR name = $1 LIMIT 1',
+    [profileName]
+  )
+  const category = catRows[0]
+
+  const { insertId: batchId } = await query(
+    `INSERT INTO batches (category_id, category_name, agent_id, agent_name, \`count\`, printed_at)
+     VALUES ($1, $2, NULL, $3, $4, CURDATE())`,
+    [category?.id || null, category?.name || profileName, 'الراوتر', codes.length]
+  )
+
+  const chunkSize = 100
+  for (let i = 0; i < codes.length; i += chunkSize) {
+    const chunk = codes.slice(i, i + chunkSize)
+    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
+    const params = chunk.flatMap((code) => [batchId, code, 'مطبوع'])
+    await query(
+      `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
+      params
+    )
+  }
+
+  const { rows: batchRows } = await query('SELECT * FROM batches WHERE id = $1', [batchId])
+  const batch = batchRows[0]
+  const cards = await getBatchCards(batchId)
+
+  return {
+    id: batch.id,
+    category: batch.category_name,
+    agent: batch.agent_name,
+    count: batch.count,
+    printedAt: formatDate(batch.printed_at),
+    cards,
+  }
+}
