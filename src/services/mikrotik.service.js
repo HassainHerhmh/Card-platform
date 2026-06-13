@@ -885,14 +885,47 @@ async function countPrintedCardsForPeriod(filterOptions = {}) {
   }
 }
 
+function normalizeInventoryCardFilters(options = {}) {
+  const status = String(options.status || 'all').trim()
+  const source = String(options.source || 'all').trim()
+  const validStatuses = new Set(['available', 'connected', 'expired', 'disabled', 'missing', 'pending'])
+  return {
+    status: validStatuses.has(status) ? status : null,
+    source: source === 'hotspot' || source === 'user-manager' ? source : null,
+  }
+}
+
+function applyInventoryCardFilters(cards, filters) {
+  let result = cards
+  if (filters.status) result = result.filter((c) => c.status === filters.status)
+  if (filters.source) result = result.filter((c) => c.source === filters.source)
+  return result
+}
+
 export async function getInventoryCount(filterOptions = {}) {
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
-    const status = await getRouterStatus()
-    const routerTotal = status.connected
-      ? Number(status.totalCards ?? (status.hotspotUsers || 0) + (status.userManagerUsers || 0)) || 0
-      : 0
+    const cardFilters = normalizeInventoryCardFilters(filterOptions)
     const cap = 10000
+
+    if (!cardFilters.status && !cardFilters.source) {
+      const status = await getRouterStatus()
+      const routerTotal = status.connected
+        ? Number(status.totalCards ?? (status.hotspotUsers || 0) + (status.userManagerUsers || 0)) || 0
+        : 0
+      return {
+        total: Math.min(routerTotal, cap),
+        dbTotal: 0,
+        routerTotal,
+        truncated: routerTotal > cap,
+        period: filter.period,
+        periodLabel: filter.periodLabel,
+        routerSource: true,
+      }
+    }
+
+    const { filtered } = await getFilteredRouterInventory(filterOptions)
+    const routerTotal = filtered.length
     return {
       total: Math.min(routerTotal, cap),
       dbTotal: 0,
@@ -981,20 +1014,27 @@ async function getCachedRouterInventory() {
   return snapshot
 }
 
-async function getRouterInventoryChunk({ filter, offset, limit }) {
+async function getFilteredRouterInventory(filterOptions = {}) {
   const snapshot = await getCachedRouterInventory()
+  const cardFilters = normalizeInventoryCardFilters(filterOptions)
+  const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+  return { snapshot, filtered, cardFilters }
+}
+
+async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = {} }) {
+  const { filtered, snapshot } = await getFilteredRouterInventory(filterOptions)
   const cap = 10000
-  const routerTotal = snapshot.cards.length
+  const routerTotal = filtered.length
   const total = Math.min(routerTotal, cap)
   const truncated = routerTotal > cap
   const safeOffset = Math.max(0, Number(offset) || 0)
   const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50))
-  const slice = snapshot.cards.slice(safeOffset, safeOffset + safeLimit)
+  const slice = filtered.slice(safeOffset, safeOffset + safeLimit)
   const loaded = Math.min(safeOffset + slice.length, total)
 
   return {
     cards: slice,
-    summary: snapshot.summary,
+    summary: computeInventorySummary(filtered.slice(0, cap)),
     period: filter.period,
     periodLabel: filter.periodLabel,
     truncated,
@@ -1362,6 +1402,8 @@ export async function getCombinedInventory(options = {}) {
     period: options.period,
     date: options.date,
     month: options.month,
+    status: options.status,
+    source: options.source,
   }
   const offset = Math.max(0, Number(options.offset) || 0)
   const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
@@ -1369,7 +1411,7 @@ export async function getCombinedInventory(options = {}) {
 
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
-    return getRouterInventoryChunk({ filter, offset, limit, dbOnly })
+    return getRouterInventoryChunk({ filter, offset, limit, dbOnly, filterOptions })
   }
 
   const { rows: dbRows, truncated, total } = await getPrintedCardsForPeriod(

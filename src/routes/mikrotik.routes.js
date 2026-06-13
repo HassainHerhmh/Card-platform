@@ -97,6 +97,8 @@ router.get('/inventory/count', async (req, res) => {
       period: req.query.period || 'day',
       date: req.query.date || '',
       month: req.query.month || '',
+      status: req.query.status || '',
+      source: req.query.source || '',
     }
     const meta = await getInventoryCount(filter)
     res.json(meta)
@@ -112,6 +114,8 @@ router.get('/inventory', async (req, res) => {
       period: req.query.period || 'day',
       date: req.query.date || '',
       month: req.query.month || '',
+      status: req.query.status || '',
+      source: req.query.source || '',
     }
     const offset = req.query.offset != null ? Number(req.query.offset) : 0
     const limit = req.query.limit != null ? Number(req.query.limit) : undefined
