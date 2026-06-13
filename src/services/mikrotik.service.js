@@ -912,6 +912,50 @@ async function fetchHotspotUsersIndexed(api, codeSet) {
   return { byName, activeUsernames, activeSessions: activeSessions || [] }
 }
 
+function mapDbRowToPlaceholderCard(dbRow, statusLabel = 'جاري التحقق من الراوتر...') {
+  const source = normalizeRouterSource(dbRow.routerSource)
+  return {
+    id: dbRow.code,
+    name: dbRow.code,
+    profile: dbRow.profile || dbRow.categoryName,
+    comment: dbRow.categoryName,
+    disabled: false,
+    uptime: '',
+    status: 'pending',
+    statusLabel,
+    connectedIp: '',
+    sessionUptime: '',
+    printedAt: dbRow.printedAt,
+    dbStatus: dbRow.dbStatus,
+    source,
+    sourceLabel: routerSourceLabel(source),
+    sourceLabelAr: routerSourceLabelAr(source),
+  }
+}
+
+const ROUTER_ENRICH_TIMEOUT_MS = 20000
+
+async function enrichDbRowsWithRouterSafe(dbRows) {
+  try {
+    return await Promise.race([
+      enrichDbRowsWithRouter(dbRows),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('ROUTER_INVENTORY_TIMEOUT')), ROUTER_ENRICH_TIMEOUT_MS)
+      }),
+    ])
+  } catch (error) {
+    if (error.message === 'ROUTER_INVENTORY_TIMEOUT') {
+      console.warn('[mikrotik] inventory enrich timeout')
+      return {
+        cards: dbRows.map((row) => mapDbRowToPlaceholderCard(row, 'تعذر الاتصال بالراوتر')),
+        sources: { hotspot: false, userManager: false },
+        userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      }
+    }
+    throw error
+  }
+}
+
 async function enrichDbRowsWithRouter(dbRows) {
   if (!dbRows.length) {
     return {
@@ -1075,11 +1119,18 @@ export async function getCombinedInventory(options = {}) {
   const period = normalizeInventoryPeriod(options.period)
   const offset = Math.max(0, Number(options.offset) || 0)
   const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
+  const dbOnly = options.dbOnly === true || options.dbOnly === '1'
 
   const { rows: dbRows, truncated, total, period: normalizedPeriod } = await getPrintedCardsForPeriod(
     period,
     { offset, limit: limit > 10000 ? 10000 : limit }
   )
+
+  const progressBase = {
+    loaded: offset,
+    total: total || 0,
+    percent: total ? Math.min(100, Math.round((offset / total) * 100)) : 100,
+  }
 
   if (!dbRows.length) {
     return {
@@ -1088,7 +1139,29 @@ export async function getCombinedInventory(options = {}) {
       period: normalizedPeriod,
       periodLabel: periodLabelAr(normalizedPeriod),
       truncated: Boolean(truncated),
-      progress: { loaded: offset, total: total || 0, percent: total ? Math.round((offset / total) * 100) : 100 },
+      progress: progressBase,
+      dbOnly,
+      sources: { hotspot: false, userManager: false },
+      userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      fetchedAt: new Date().toISOString(),
+    }
+  }
+
+  if (dbOnly) {
+    const cards = dbRows.map((row) => mapDbRowToPlaceholderCard(row))
+    const loaded = Math.min(offset + cards.length, total || offset + cards.length)
+    return {
+      cards,
+      summary: computeInventorySummary(cards),
+      period: normalizedPeriod,
+      periodLabel: periodLabelAr(normalizedPeriod),
+      truncated: Boolean(truncated),
+      progress: {
+        loaded,
+        total: total || loaded,
+        percent: total ? Math.min(100, Math.round((loaded / total) * 100)) : 100,
+      },
+      dbOnly: true,
       sources: { hotspot: false, userManager: false },
       userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
       fetchedAt: new Date().toISOString(),
@@ -1096,7 +1169,7 @@ export async function getCombinedInventory(options = {}) {
   }
 
   try {
-    const enriched = await enrichDbRowsWithRouter(dbRows)
+    const enriched = await enrichDbRowsWithRouterSafe(dbRows)
     const loaded = Math.min(offset + enriched.cards.length, total || offset + enriched.cards.length)
     const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 100
 
@@ -1107,6 +1180,7 @@ export async function getCombinedInventory(options = {}) {
       periodLabel: periodLabelAr(normalizedPeriod),
       truncated: Boolean(truncated),
       progress: { loaded, total: total || loaded, percent },
+      dbOnly: false,
       sources: enriched.sources,
       userManager: enriched.userManager,
       fetchedAt: new Date().toISOString(),

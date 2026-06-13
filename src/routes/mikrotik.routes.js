@@ -107,7 +107,8 @@ router.get('/inventory', async (req, res) => {
     const period = req.query.period || 'week'
     const offset = req.query.offset != null ? Number(req.query.offset) : 0
     const limit = req.query.limit != null ? Number(req.query.limit) : undefined
-    const inventory = await getCombinedInventory({ period, offset, limit })
+    const dbOnly = req.query.dbOnly === '1' || req.query.dbOnly === 'true'
+    const inventory = await getCombinedInventory({ period, offset, limit, dbOnly })
     res.json(inventory)
   } catch (error) {
     console.error(error)
