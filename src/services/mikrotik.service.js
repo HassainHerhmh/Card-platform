@@ -26,7 +26,7 @@ function getConnectionConfig() {
     port,
     user: env.mikrotik.user,
     password: env.mikrotik.password,
-    timeout: 15,
+    timeout: 25,
     tls: env.mikrotik.useTls ? { rejectUnauthorized: false } : undefined,
   }
 }
@@ -77,6 +77,60 @@ function mapConnectionError(error) {
   return msg
 }
 
+/** عدّ سريع بدون جلب كل السجلات — للمراقبة فقط */
+async function printCount(api, path) {
+  try {
+    const rows = await api.write(path, ['=count-only='])
+    if (!rows?.length) return 0
+    const row = rows[0]
+    if (row.ret !== undefined && row.ret !== null && row.ret !== '') {
+      return Number(row.ret) || 0
+    }
+    return 0
+  } catch {
+    return 0
+  }
+}
+
+async function fetchUserManagerStatusLite(api) {
+  try {
+    const [userManagerUsers, activeUserManagerSessions, umProfiles, customersRaw] = await Promise.all([
+      printCount(api, '/tool/user-manager/user/print'),
+      printCount(api, '/tool/user-manager/session/print'),
+      printCount(api, '/tool/user-manager/profile/print'),
+      api.write('/tool/user-manager/customer/print').catch(() => []),
+    ])
+
+    const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
+    const defaultCustomer = pickDefaultUserManagerCustomer(customers, [])
+
+    return {
+      userManagerUsers,
+      activeUserManagerSessions,
+      userManager: {
+        available: userManagerUsers > 0 || customers.length > 0 || umProfiles > 0,
+        customers: customers.map((c) => ({
+          login: customerLogin(c),
+          name: c.name,
+        })),
+        defaultCustomer,
+        profiles: umProfiles,
+      },
+    }
+  } catch {
+    return {
+      userManagerUsers: 0,
+      activeUserManagerSessions: 0,
+      userManager: {
+        available: false,
+        customers: [],
+        defaultCustomer: null,
+        profiles: 0,
+      },
+    }
+  }
+}
+
 export async function syncRouterCardsCount(liveCount) {
   if (liveCount == null) {
     const status = await getRouterStatus()
@@ -101,46 +155,14 @@ export async function getRouterStatus() {
     return await withConnection(async (api, connection) => {
       const identityRows = await api.write('/system/identity/print')
       const resourceRows = await api.write('/system/resource/print')
-      let hotspotUsers = 0
-      let activeHotspotUsers = 0
-      let userManagerUsers = 0
-      let activeUserManagerSessions = 0
-      let userManager = {
-        available: false,
-        customers: [],
-        defaultCustomer: null,
-        profiles: 0,
-      }
 
-      try {
-        const users = await api.write('/ip/hotspot/user/print')
-        hotspotUsers = Array.isArray(users) ? users.length : 0
-      } catch {
-        hotspotUsers = 0
-      }
-      try {
-        const active = await api.write('/ip/hotspot/active/print')
-        activeHotspotUsers = Array.isArray(active) ? active.length : 0
-      } catch {
-        activeHotspotUsers = 0
-      }
-      try {
-        const um = await fetchUserManagerSnapshot(api)
-        userManagerUsers = um.users.length
-        activeUserManagerSessions = um.sessions.length
-        userManager = {
-          available: true,
-          customers: um.customers.map((c) => ({
-            login: customerLogin(c),
-            name: c.name,
-          })),
-          defaultCustomer: um.defaultCustomer,
-          profiles: um.profiles.length,
-        }
-      } catch {
-        userManagerUsers = 0
-        activeUserManagerSessions = 0
-      }
+      const [hotspotUsers, activeHotspotUsers, umLite] = await Promise.all([
+        printCount(api, '/ip/hotspot/user/print'),
+        printCount(api, '/ip/hotspot/active/print'),
+        fetchUserManagerStatusLite(api),
+      ])
+
+      const { userManagerUsers, activeUserManagerSessions, userManager } = umLite
 
       const identity = identityRows?.[0] || {}
       const resource = resourceRows?.[0] || {}
