@@ -1,8 +1,14 @@
 import { Router } from 'express'
 import { requireGatewayAuth } from '../middleware/gatewayAuth.js'
+import { gatewayRequestRateLimit } from '../middleware/gatewayRateLimit.js'
+import { gatewaySecurityHeaders } from '../middleware/gatewaySecurityHeaders.js'
 import * as smsGatewayService from '../services/sms-gateway.service.js'
+import { parsePositiveInt } from '../utils/validateId.js'
 
 const router = Router()
+
+router.use(gatewaySecurityHeaders)
+router.use(gatewayRequestRateLimit)
 router.use(requireGatewayAuth)
 
 router.get('/stats', async (_req, res) => {
@@ -12,7 +18,7 @@ router.get('/stats', async (_req, res) => {
     res.json({ stats })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر جلب إحصائيات البوابة' })
+    res.status(500).json({ message: 'تعذر جلب الإحصائيات' })
   }
 })
 
@@ -23,29 +29,35 @@ router.get('/pending', async (req, res) => {
     res.json({ messages })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر جلب الرسائل المعلقة' })
+    res.status(500).json({ message: 'تعذر جلب الرسائل' })
   }
 })
 
 router.post('/:id/sent', async (req, res) => {
-  try {
-    const row = await smsGatewayService.markSmsSent(+req.params.id)
-    if (!row) return res.status(404).json({ message: 'الرسالة غير موجودة أو مُرسلة مسبقاً' })
-    res.json({ ok: true, message: row })
-  } catch (error) {
-    console.error(error)
-    res.status(500).json({ message: 'تعذر تحديث حالة الرسالة' })
-  }
-})
+  const id = parsePositiveInt(req.params.id)
+  if (!id) return res.status(400).json({ message: 'معرّف غير صالح' })
 
-router.post('/:id/failed', async (req, res) => {
   try {
-    const row = await smsGatewayService.markSmsFailed(+req.params.id, req.body?.error)
+    const row = await smsGatewayService.markSmsSent(id)
     if (!row) return res.status(404).json({ message: 'الرسالة غير موجودة' })
     res.json({ ok: true, message: row })
   } catch (error) {
     console.error(error)
-    res.status(500).json({ message: 'تعذر تحديث حالة الرسالة' })
+    res.status(500).json({ message: 'تعذر تحديث الحالة' })
+  }
+})
+
+router.post('/:id/failed', async (req, res) => {
+  const id = parsePositiveInt(req.params.id)
+  if (!id) return res.status(400).json({ message: 'معرّف غير صالح' })
+
+  try {
+    const row = await smsGatewayService.markSmsFailed(id, req.body?.error)
+    if (!row) return res.status(404).json({ message: 'الرسالة غير موجودة' })
+    res.json({ ok: true, message: row })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر تحديث الحالة' })
   }
 })
 

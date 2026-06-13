@@ -63,7 +63,7 @@ router.get('/transactions', async (req, res) => {
 router.get('/sms-service', async (_req, res) => {
   try {
     const status = await smsGatewayService.getSmsServiceStatus()
-    res.json({ smsService: status })
+    res.json({ smsService: { available: status.available } })
   } catch (error) {
     console.error(error)
     res.status(500).json({ message: 'تعذر التحقق من خدمة SMS' })

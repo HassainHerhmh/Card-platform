@@ -17,6 +17,8 @@ import smsGatewayRoutes from './routes/sms-gateway.routes.js'
 
 const app = express()
 
+app.set('trust proxy', 1)
+
 const allowedOrigins = env.clientUrl
   .split(',')
   .map((origin) => origin.trim())

@@ -31,6 +31,7 @@ export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   jwtSecret: process.env.JWT_SECRET || 'dev-only-secret-change-me',
   smsGatewayToken: process.env.SMS_GATEWAY_TOKEN || '',
+  smsGatewayDeviceId: process.env.SMS_GATEWAY_DEVICE_ID || '',
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   databaseUrl: buildDatabaseUrl(),
   mikrotik: {
