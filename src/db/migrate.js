@@ -41,6 +41,24 @@ export async function migrate() {
     }
   }
 
+  try {
+    await pool.execute(`
+      UPDATE ledger l
+      INNER JOIN (
+        SELECT l2.id AS ledger_id, MAX(sq.created_at) AS ts
+        FROM ledger l2
+        INNER JOIN sms_queue sq ON sq.agent_id = l2.agent_id
+        INNER JOIN cards c ON c.id = sq.card_id AND l2.description LIKE CONCAT('%كود ', c.code)
+        WHERE l2.type = 'بيع'
+        GROUP BY l2.id
+      ) src ON src.ledger_id = l.id
+      SET l.created_at = src.ts
+      WHERE l.created_at IS NULL
+    `)
+  } catch (error) {
+    console.warn('ledger created_at backfill skipped:', error.message)
+  }
+
   const defaultAgentHash = await bcrypt.hash('123456', 10)
   await pool.execute(
     'UPDATE agents SET password_hash = ? WHERE password_hash IS NULL OR password_hash = \'\'',

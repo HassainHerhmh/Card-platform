@@ -72,6 +72,17 @@ function extractCardCode(description) {
   return match ? match[1] : null
 }
 
+function toIsoTimestamp(value) {
+  if (!value) return null
+  const d = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
+}
+
+function resolveOccurredAt(row) {
+  return toIsoTimestamp(row.smsCreatedAt || row.createdAt)
+}
+
 export async function getAgentTransactions(agentId, limit = 20) {
   const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 100)
   const { rows } = await query(
@@ -84,9 +95,10 @@ export async function getAgentTransactions(agentId, limit = 20) {
                AND l.description LIKE CONCAT('%كود ', SUBSTRING_INDEX(l.description, 'كود ', -1), '%')
              ORDER BY sq.id DESC LIMIT 1) AS smsStatus,
             (SELECT sq.created_at FROM sms_queue sq
+             INNER JOIN cards c ON c.id = sq.card_id
              WHERE sq.agent_id = l.agent_id
                AND l.\`type\` = 'بيع'
-               AND l.description LIKE CONCAT('%كود ', SUBSTRING_INDEX(l.description, 'كود ', -1), '%')
+               AND l.description LIKE CONCAT('%كود ', c.code)
              ORDER BY sq.id DESC LIMIT 1) AS smsCreatedAt
      FROM ledger l
      WHERE l.agent_id = $1
@@ -130,7 +142,7 @@ export async function getAgentTransactions(agentId, limit = 20) {
       cardNumber: cardCode,
       amount: Math.abs(amount),
       date: formatDate(row.date),
-      occurredAt: row.smsCreatedAt || row.createdAt || row.date,
+      occurredAt: resolveOccurredAt(row),
       status,
       statusNote,
       statusType,

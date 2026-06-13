@@ -64,8 +64,8 @@ export async function appendLedgerEntry({
 
   const { insertId } = await query(
     `INSERT INTO ledger
-     (\`date\`, agent_id, agent_name, \`type\`, cards, amount, balance, debit, credit, description, reference_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+     (\`date\`, agent_id, agent_name, \`type\`, cards, amount, balance, debit, credit, description, reference_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
     [
       entryDate,
       agentId,
@@ -111,8 +111,8 @@ export async function recordCardSale({ agentId, agentName, price, categoryName, 
 
   const { insertId } = await query(
     `INSERT INTO ledger
-     (\`date\`, agent_id, agent_name, \`type\`, cards, amount, balance, debit, credit, description)
-     VALUES (CURDATE(), $1, $2, 'بيع', 1, $3, $4, $5, 0, $6)`,
+     (\`date\`, agent_id, agent_name, \`type\`, cards, amount, balance, debit, credit, description, created_at)
+     VALUES (CURDATE(), $1, $2, 'بيع', 1, $3, $4, $5, 0, $6, NOW())`,
     [agentId, agentName, debitVal, newBalance, debitVal, description]
   )
 
