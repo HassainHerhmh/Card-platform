@@ -280,7 +280,7 @@ function mapAccount(row) {
     financial_statement: row.financial_statement,
     parent_name: row.parent_name || null,
     group_name: row.group_name || null,
-    created_by: row.created_by_name || row.created_by || null,
+    created_by: row.created_by_name || row.created_by_username || null,
     branch_name: row.branch_name || null,
     created_at: row.created_at ? formatDateTime(row.created_at) : null,
   }
@@ -291,7 +291,8 @@ const ACCOUNT_LIST_SQL = `
          aa.account_level, aa.financial_statement, aa.created_at,
          p.name_ar AS parent_name,
          ag.name_ar AS group_name,
-         u.username AS created_by_name
+         u.username AS created_by_username,
+         TRIM(CONCAT_WS(' ', NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.role), ''))) AS created_by_name
   FROM accounting_accounts aa
   LEFT JOIN accounting_accounts p ON p.id = aa.parent_id
   LEFT JOIN account_groups ag ON ag.id = aa.account_group_id
@@ -713,7 +714,8 @@ async function resolveCashOrBankAccountId({ type, cashBoxId, bankId }) {
 
 export async function listReceiptVouchers() {
   const { rows } = await query(
-    `SELECT rv.*, c.name_ar AS currency_name, aa.name_ar AS account_name, u.username AS user_name
+    `SELECT rv.*, c.name_ar AS currency_name, aa.name_ar AS account_name,
+            TRIM(CONCAT_WS(' ', NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.role), ''))) AS user_name
      FROM receipt_vouchers rv
      LEFT JOIN currencies c ON c.id = rv.currency_id
      LEFT JOIN accounting_accounts aa ON aa.id = rv.account_id
@@ -775,7 +777,8 @@ export async function deleteReceiptVoucher(id) {
 
 export async function listPaymentVouchers() {
   const { rows } = await query(
-    `SELECT pv.*, c.name_ar AS currency_name, aa.name_ar AS account_name, u.username AS user_name
+    `SELECT pv.*, c.name_ar AS currency_name, aa.name_ar AS account_name,
+            TRIM(CONCAT_WS(' ', NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.role), ''))) AS user_name
      FROM payment_vouchers pv
      LEFT JOIN currencies c ON c.id = pv.currency_id
      LEFT JOIN accounting_accounts aa ON aa.id = pv.account_id
