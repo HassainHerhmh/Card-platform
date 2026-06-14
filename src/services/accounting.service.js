@@ -208,6 +208,7 @@ export async function ensureAccountingTables() {
   }
 
   await backfillFinancialStatements()
+  await backfillEntityAccountCreators()
 }
 
 function normalizeArabicName(value) {
@@ -271,6 +272,25 @@ async function backfillFinancialStatements() {
     }
   } catch (error) {
     console.warn('account financial_statement backfill skipped:', error.message)
+  }
+}
+
+async function backfillEntityAccountCreators() {
+  try {
+    await query(
+      `UPDATE accounting_accounts aa
+       INNER JOIN cash_boxes cb ON cb.account_id = aa.id
+       SET aa.created_by = cb.created_by
+       WHERE aa.created_by IS NULL AND cb.created_by IS NOT NULL`
+    )
+    await query(
+      `UPDATE accounting_accounts aa
+       INNER JOIN banks b ON b.account_id = aa.id
+       SET aa.created_by = b.created_by
+       WHERE aa.created_by IS NULL AND b.created_by IS NOT NULL`
+    )
+  } catch (error) {
+    console.warn('entity account created_by backfill skipped:', error.message)
   }
 }
 
@@ -459,13 +479,32 @@ export async function deleteAccount(id) {
   await query('DELETE FROM accounting_accounts WHERE id = $1', [id])
 }
 
-async function createLinkedSubAccount({ parentId, name_ar, name_en, entityType, entityId }) {
+async function createLinkedSubAccount({
+  parentId,
+  name_ar,
+  name_en,
+  entityType,
+  entityId,
+  created_by = null,
+}) {
   const code = await nextAccountCode(parentId)
+  const parentFinancial = await getParentFinancialStatement(parentId)
+  const financialStatement = parentFinancial || inferFinancialStatement(name_ar, parentFinancial)
+
   const { insertId } = await query(
     `INSERT INTO accounting_accounts
-     (code, name_ar, name_en, parent_id, account_level, entity_type, entity_id)
-     VALUES ($1, $2, $3, $4, 'فرعي', $5, $6)`,
-    [code, name_ar, name_en || null, parentId, entityType, entityId]
+     (code, name_ar, name_en, parent_id, account_level, financial_statement, entity_type, entity_id, created_by)
+     VALUES ($1, $2, $3, $4, 'فرعي', $5, $6, $7, $8)`,
+    [
+      code,
+      name_ar,
+      name_en || null,
+      parentId,
+      financialStatement,
+      entityType,
+      entityId,
+      created_by || null,
+    ]
   )
   return insertId
 }
@@ -623,6 +662,7 @@ export async function createCashBox(data) {
     name_en: data.name_en,
     entityType: 'cash_box',
     entityId: null,
+    created_by: data.created_by || null,
   })
   const code = String(accountId).padStart(4, '0')
   const { insertId } = await query(
@@ -704,6 +744,7 @@ export async function createBank(data) {
     name_en: data.name_en,
     entityType: 'bank',
     entityId: null,
+    created_by: data.created_by || null,
   })
   const { insertId } = await query(
     `INSERT INTO banks (name_ar, name_en, code, bank_group_id, account_id, created_by)

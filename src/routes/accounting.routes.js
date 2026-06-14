@@ -179,7 +179,10 @@ router.get('/cash-boxes', async (req, res) => {
 
 router.post('/cash-boxes', async (req, res) => {
   try {
-    ok(res, await accounting.createCashBox(req.body))
+    ok(res, await accounting.createCashBox({
+      ...req.body,
+      created_by: req.user?.id || req.body.created_by || null,
+    }))
   } catch (e) { fail(res, e) }
 })
 
@@ -231,7 +234,10 @@ router.get('/banks', async (req, res) => {
 
 router.post('/banks', async (req, res) => {
   try {
-    ok(res, await accounting.createBank(req.body))
+    ok(res, await accounting.createBank({
+      ...req.body,
+      created_by: req.user?.id || req.body.created_by || null,
+    }))
   } catch (e) { fail(res, e) }
 })
 
