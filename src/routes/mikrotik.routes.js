@@ -99,6 +99,7 @@ router.get('/inventory/count', async (req, res) => {
       month: req.query.month || '',
       status: req.query.status || '',
       source: req.query.source || '',
+      refresh: req.query.refresh === '1' || req.query.refresh === 'true',
     }
     const meta = await getInventoryCount(filter)
     res.json(meta)
@@ -116,6 +117,7 @@ router.get('/inventory', async (req, res) => {
       month: req.query.month || '',
       status: req.query.status || '',
       source: req.query.source || '',
+      refresh: req.query.refresh === '1' || req.query.refresh === 'true',
     }
     const offset = req.query.offset != null ? Number(req.query.offset) : 0
     const limit = req.query.limit != null ? Number(req.query.limit) : undefined

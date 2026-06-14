@@ -235,6 +235,19 @@ export async function migrate() {
   `)
 
   // لا تحذف الدفعات تلقائياً — كان يمسح كل طباعة عند إعادة تشغيل السيرفر
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS router_inventory_cache (
+      id TINYINT NOT NULL PRIMARY KEY DEFAULT 1,
+      cards_blob MEDIUMBLOB NOT NULL,
+      summary_json JSON NOT NULL,
+      sources_json JSON NOT NULL,
+      user_manager_json JSON NOT NULL,
+      card_count INT NOT NULL DEFAULT 0,
+      fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `)
+
   if (process.env.CLEAR_LEGACY_BATCHES === '1') {
     try {
       await pool.execute('DELETE FROM sms_queue WHERE card_id IS NOT NULL')

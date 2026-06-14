@@ -1,4 +1,5 @@
 import { RouterOSAPI } from 'node-routeros'
+import { gzipSync, gunzipSync } from 'zlib'
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
 import {
@@ -1095,29 +1096,29 @@ function applyInventoryCardFilters(cards, filters) {
 }
 
 export async function getInventoryCount(filterOptions = {}) {
+  const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
-    const cardFilters = normalizeInventoryCardFilters(filterOptions)
     const cap = 10000
-
-    if (!cardFilters.status && !cardFilters.source) {
-      const status = await getRouterStatus()
-      const routerTotal = status.connected
-        ? Number(status.totalCards ?? (status.hotspotUsers || 0) + (status.userManagerUsers || 0)) || 0
-        : 0
+    const snapshot = await getCachedRouterInventory({ refresh })
+    if (!snapshot?.cards?.length) {
       return {
-        total: Math.min(routerTotal, cap),
+        total: 0,
         dbTotal: 0,
-        routerTotal,
-        truncated: routerTotal > cap,
+        routerTotal: 0,
+        truncated: false,
         period: filter.period,
         periodLabel: filter.periodLabel,
         routerSource: true,
+        cached: false,
+        needsRefresh: true,
+        message: 'لا يوجد مخزون محفوظ — اضغط «تحديث» للمزامنة من الراوتر',
       }
     }
 
-    const { filtered } = await getFilteredRouterInventory(filterOptions)
-    const routerTotal = filtered.length
+    const cardFilters = normalizeInventoryCardFilters(filterOptions)
+    const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+    const routerTotal = cardFilters.status || cardFilters.source ? filtered.length : snapshot.cards.length
     return {
       total: Math.min(routerTotal, cap),
       dbTotal: 0,
@@ -1126,6 +1127,9 @@ export async function getInventoryCount(filterOptions = {}) {
       period: filter.period,
       periodLabel: filter.periodLabel,
       routerSource: true,
+      cached: true,
+      needsRefresh: false,
+      fetchedAt: snapshot.fetchedAt,
     }
   }
   return countPrintedCardsForPeriod(filterOptions)
@@ -1134,7 +1138,67 @@ export async function getInventoryCount(filterOptions = {}) {
 let routerInventoryCache = null
 let routerInventoryCacheAt = 0
 let routerInventoryBuildPromise = null
-const ROUTER_INVENTORY_CACHE_MS = 300_000
+const ROUTER_INVENTORY_CACHE_MS = 24 * 60 * 60 * 1000
+
+async function loadPersistedRouterInventory() {
+  try {
+    const { rows } = await query(
+      `SELECT cards_blob AS cardsBlob, summary_json AS summaryJson, sources_json AS sourcesJson,
+              user_manager_json AS userManagerJson, card_count AS cardCount, fetched_at AS fetchedAt
+       FROM router_inventory_cache WHERE id = 1 LIMIT 1`
+    )
+    const row = rows[0]
+    if (!row?.cardsBlob) return null
+
+    const cardsJson = gunzipSync(row.cardsBlob).toString('utf8')
+    const cards = JSON.parse(cardsJson)
+    if (!Array.isArray(cards) || !cards.length) return null
+
+    return {
+      cards,
+      summary: row.summaryJson ? JSON.parse(row.summaryJson) : computeInventorySummary(cards),
+      sources: row.sourcesJson ? JSON.parse(row.sourcesJson) : { hotspot: true, userManager: false },
+      userManager: row.userManagerJson ? JSON.parse(row.userManagerJson) : { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      fetchedAt: row.fetchedAt ? new Date(row.fetchedAt).toISOString() : new Date().toISOString(),
+      fromPersisted: true,
+    }
+  } catch (error) {
+    console.warn('[mikrotik] load persisted inventory failed:', error.message)
+    return null
+  }
+}
+
+async function savePersistedRouterInventory(snapshot) {
+  try {
+    const cardsBlob = gzipSync(JSON.stringify(snapshot.cards))
+    const summaryJson = JSON.stringify(snapshot.summary || computeInventorySummary(snapshot.cards))
+    const sourcesJson = JSON.stringify(snapshot.sources || {})
+    const userManagerJson = JSON.stringify(snapshot.userManager || {})
+    await query(
+      `INSERT INTO router_inventory_cache
+         (id, cards_blob, summary_json, sources_json, user_manager_json, card_count, fetched_at)
+       VALUES (1, $1, $2, $3, $4, $5, $6)
+       ON DUPLICATE KEY UPDATE
+         cards_blob = VALUES(cards_blob),
+         summary_json = VALUES(summary_json),
+         sources_json = VALUES(sources_json),
+         user_manager_json = VALUES(user_manager_json),
+         card_count = VALUES(card_count),
+         fetched_at = VALUES(fetched_at)`,
+      [
+        cardsBlob,
+        summaryJson,
+        sourcesJson,
+        userManagerJson,
+        snapshot.cards.length,
+        snapshot.fetchedAt ? new Date(snapshot.fetchedAt) : new Date(),
+      ]
+    )
+    console.info(`[mikrotik] persisted router inventory: ${snapshot.cards.length} cards`)
+  } catch (error) {
+    console.warn('[mikrotik] save persisted inventory failed:', error.message)
+  }
+}
 
 const HS_USER_PROPS = [
   '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,password,last-logged-out,last-logged-in',
@@ -1219,10 +1283,25 @@ async function buildRouterInventorySnapshot(api) {
   }
 }
 
-async function getCachedRouterInventory() {
+async function getCachedRouterInventory({ refresh = false } = {}) {
+  if (refresh) {
+    routerInventoryCache = null
+    routerInventoryCacheAt = 0
+  }
+
   const now = Date.now()
-  if (routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
+  if (!refresh && routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
     return routerInventoryCache
+  }
+
+  if (!refresh) {
+    const persisted = await loadPersistedRouterInventory()
+    if (persisted) {
+      routerInventoryCache = persisted
+      routerInventoryCacheAt = now
+      return persisted
+    }
+    return null
   }
 
   if (routerInventoryBuildPromise) {
@@ -1230,9 +1309,10 @@ async function getCachedRouterInventory() {
   }
 
   routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
-    .then((snapshot) => {
+    .then(async (snapshot) => {
       routerInventoryCache = snapshot
       routerInventoryCacheAt = Date.now()
+      await savePersistedRouterInventory(snapshot)
       return snapshot
     })
     .finally(() => {
@@ -1243,7 +1323,11 @@ async function getCachedRouterInventory() {
 }
 
 async function getFilteredRouterInventory(filterOptions = {}) {
-  const snapshot = await getCachedRouterInventory()
+  const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
+  const snapshot = await getCachedRouterInventory({ refresh })
+  if (!snapshot) {
+    return { snapshot: null, filtered: [], cardFilters: normalizeInventoryCardFilters(filterOptions) }
+  }
   const cardFilters = normalizeInventoryCardFilters(filterOptions)
   const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
   return { snapshot, filtered, cardFilters }
@@ -1251,6 +1335,23 @@ async function getFilteredRouterInventory(filterOptions = {}) {
 
 async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = {} }) {
   const { filtered, snapshot } = await getFilteredRouterInventory(filterOptions)
+  if (!snapshot) {
+    return {
+      cards: [],
+      summary: computeInventorySummary([]),
+      period: filter.period,
+      periodLabel: filter.periodLabel,
+      truncated: false,
+      progress: { loaded: 0, total: 0, percent: 100 },
+      dbOnly: false,
+      routerSource: true,
+      cached: false,
+      needsRefresh: true,
+      sources: { hotspot: false, userManager: false },
+      userManager: { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      fetchedAt: new Date().toISOString(),
+    }
+  }
   const cap = 10000
   const routerTotal = filtered.length
   const total = Math.min(routerTotal, cap)
@@ -1273,6 +1374,8 @@ async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = 
     },
     dbOnly: false,
     routerSource: true,
+    cached: true,
+    needsRefresh: false,
     sources: snapshot.sources,
     userManager: snapshot.userManager,
     fetchedAt: snapshot.fetchedAt,
@@ -1648,6 +1751,7 @@ export async function getCombinedInventory(options = {}) {
     month: options.month,
     status: options.status,
     source: options.source,
+    refresh: options.refresh,
   }
   const offset = Math.max(0, Number(options.offset) || 0)
   const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
