@@ -296,7 +296,7 @@ function resolveCardStatus(user, activeUsernames, usageCheck = hasCardUsage) {
   if (user.disabled) {
     return { status: 'disabled', label: 'معطّل' }
   }
-  if (activeUsernames.has(user.name)) {
+  if (isUserCurrentlyOnline(user, activeUsernames)) {
     return { status: 'connected', label: 'متصل الآن' }
   }
   if (usageCheck(user)) {
@@ -761,7 +761,7 @@ function mapUserManagerUserRow(u) {
   return {
     id: u['.id'],
     serialNumber: extractRouterSerial(u),
-    name: u.username || u.name || '',
+    name: u.name || u.username || '',
     password: u.password || '',
     profile: u['actual-profile'] || u.profile || '',
     packageLabel: u['actual-profile'] || u.profile || '',
@@ -812,6 +812,54 @@ function formatLastSeen(value) {
   return String(value).trim()
 }
 
+const CONNECTED_RECENCY_MS = 45 * 60 * 1000
+
+function parseMikrotikLastSeen(value) {
+  if (value == null || value === '') return null
+  const raw = String(value).trim()
+  if (/^never$/i.test(raw)) return null
+
+  const match = raw.match(/^([a-z]{3})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})$/i)
+  if (match) {
+    const months = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+    }
+    const monthIdx = months[match[1].toLowerCase()]
+    if (monthIdx == null) return null
+    const dt = new Date(
+      Number(match[3]),
+      monthIdx,
+      Number(match[2]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6])
+    )
+    if (Number.isNaN(dt.getTime()) || dt.getFullYear() < 2020) return null
+    return dt
+  }
+
+  const iso = Date.parse(raw)
+  if (!Number.isNaN(iso)) {
+    const dt = new Date(iso)
+    if (dt.getFullYear() < 2020) return null
+    return dt
+  }
+  return null
+}
+
+function isRecentlyConnected(lastSeen, windowMs = CONNECTED_RECENCY_MS) {
+  const dt = parseMikrotikLastSeen(lastSeen)
+  if (!dt) return false
+  const ageMs = Date.now() - dt.getTime()
+  return ageMs >= 0 && ageMs <= windowMs
+}
+
+function isUserCurrentlyOnline(user, activeUsernames) {
+  if (activeUsernames?.has(user.name)) return true
+  return isRecentlyConnected(user.lastSeen)
+}
+
 function finishInventoryCard(card, extras = {}) {
   const bytesIn = Number(card.bytesIn || 0)
   const bytesOut = Number(card.bytesOut || 0)
@@ -843,7 +891,7 @@ function resolveUserManagerCardStatus(user, activeUsernames) {
   if (user.disabled) {
     return { status: 'disabled', label: 'معطّل' }
   }
-  if (activeUsernames.has(user.name)) {
+  if (isUserCurrentlyOnline(user, activeUsernames)) {
     return { status: 'connected', label: 'متصل الآن' }
   }
 
@@ -1060,18 +1108,39 @@ const HS_USER_PROPS = [
   '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,password,last-logged-out,last-logged-in',
 ]
 const UM_USER_PROPS = [
-  '=.proplist=username,name,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,customer,last-seen,registration-date,reg-key',
+  '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,last-seen',
 ]
 
+async function printWithProplistFallback(api, path, proplist) {
+  try {
+    const withProps = await api.write(path, [proplist])
+    if (Array.isArray(withProps) && withProps.length > 0) return withProps
+
+    const count = await printCount(api, path)
+    if (count > 0) {
+      console.warn(`[mikrotik] ${path} proplist returned 0/${count} — using full print`)
+      return await api.write(path)
+    }
+    return withProps || []
+  } catch (error) {
+    if (isUserManagerUnavailable(error)) return []
+    try {
+      console.warn(`[mikrotik] ${path} proplist failed (${error.message}) — using full print`)
+      return await api.write(path)
+    } catch (fallbackError) {
+      if (isUserManagerUnavailable(fallbackError)) return []
+      throw fallbackError
+    }
+  }
+}
+
 async function buildRouterInventorySnapshot(api) {
-  const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw] = await Promise.all([
-    api.write('/ip/hotspot/user/print', HS_USER_PROPS),
+  const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw, umUserCount] = await Promise.all([
+    printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
-    api.write('/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
-      if (isUserManagerUnavailable(error)) return []
-      throw error
-    }),
+    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0]),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
+    printCount(api, '/tool/user-manager/user/print').catch(() => 0),
   ])
 
   const activeHotspotUsernames = new Set(
@@ -1085,7 +1154,7 @@ async function buildRouterInventorySnapshot(api) {
 
   const umSessions = umSessionsRaw || []
   const activeUmUsernames = new Set(
-    umSessions.map((s) => s.user || s.username).filter(Boolean)
+    umSessions.flatMap((s) => [s.user, s.username].filter(Boolean))
   )
 
   const umCards = (umUsersRaw || []).map((u) => {
@@ -1094,10 +1163,11 @@ async function buildRouterInventorySnapshot(api) {
   })
 
   const userManagerMeta = {
-    available: umUsersRaw != null && (umUsersRaw.length > 0 || umSessions.length > 0),
+    available: umCards.length > 0 || umSessions.length > 0 || umUserCount > 0,
     customers: [],
     defaultCustomer: null,
     profiles: 0,
+    userCount: umUserCount || umCards.length,
   }
 
   const cards = [...hotspotCards, ...umCards]
