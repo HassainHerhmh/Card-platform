@@ -1,4 +1,5 @@
 import { query } from '../db/pool.js'
+import { formatDateTime } from '../utils/format.js'
 
 export async function ensureAccountingTables() {
   const statements = [
@@ -20,6 +21,7 @@ export async function ensureAccountingTables() {
       financial_statement VARCHAR(100) NULL,
       entity_type VARCHAR(30) NULL,
       entity_id INT NULL,
+      created_by INT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_parent (parent_id),
       INDEX idx_level (account_level)
@@ -180,6 +182,12 @@ export async function ensureAccountingTables() {
     await query(sql)
   }
 
+  try {
+    await query('ALTER TABLE accounting_accounts ADD COLUMN created_by INT NULL')
+  } catch (error) {
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error
+  }
+
   const { rows: currencyRows } = await query('SELECT id FROM currencies LIMIT 1')
   if (!currencyRows.length) {
     await query(
@@ -204,8 +212,25 @@ function mapAccount(row) {
     account_group_id: row.account_group_id,
     account_level: row.account_level,
     financial_statement: row.financial_statement,
+    parent_name: row.parent_name || null,
+    group_name: row.group_name || null,
+    created_by: row.created_by_name || row.created_by || null,
+    branch_name: row.branch_name || null,
+    created_at: row.created_at ? formatDateTime(row.created_at) : null,
   }
 }
+
+const ACCOUNT_LIST_SQL = `
+  SELECT aa.id, aa.code, aa.name_ar, aa.name_en, aa.parent_id, aa.account_group_id,
+         aa.account_level, aa.financial_statement, aa.created_at,
+         p.name_ar AS parent_name,
+         ag.name_ar AS group_name,
+         u.username AS created_by_name
+  FROM accounting_accounts aa
+  LEFT JOIN accounting_accounts p ON p.id = aa.parent_id
+  LEFT JOIN account_groups ag ON ag.id = aa.account_group_id
+  LEFT JOIN users u ON u.id = aa.created_by
+`
 
 function buildTree(list) {
   const byParent = new Map()
@@ -246,18 +271,14 @@ async function nextAccountCode(parentId) {
 }
 
 export async function listAccounts() {
-  const { rows } = await query(
-    `SELECT id, code, name_ar, name_en, parent_id, account_group_id, account_level, financial_statement
-     FROM accounting_accounts ORDER BY code`
-  )
+  const { rows } = await query(`${ACCOUNT_LIST_SQL} ORDER BY aa.code`)
   const list = rows.map(mapAccount)
   return { tree: buildTree(list), list }
 }
 
 export async function listSubAccounts() {
   const { rows } = await query(
-    `SELECT id, code, name_ar, name_en, parent_id, account_group_id, account_level, financial_statement
-     FROM accounting_accounts WHERE account_level = 'فرعي' ORDER BY code`
+    `${ACCOUNT_LIST_SQL} WHERE aa.account_level = 'فرعي' ORDER BY aa.code`
   )
   return rows.map(mapAccount)
 }
@@ -278,8 +299,8 @@ export async function createAccount(data) {
   const code = await nextAccountCode(parentId)
   const { insertId } = await query(
     `INSERT INTO accounting_accounts
-     (code, name_ar, name_en, parent_id, account_group_id, account_level, financial_statement)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+     (code, name_ar, name_en, parent_id, account_group_id, account_level, financial_statement, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       code,
       data.name_ar,
@@ -288,6 +309,7 @@ export async function createAccount(data) {
       data.account_group_id || null,
       level,
       data.financial_statement || null,
+      data.created_by || null,
     ]
   )
   return { id: insertId, code }

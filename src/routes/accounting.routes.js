@@ -40,7 +40,10 @@ router.get('/accounts/main-for-banks', async (_req, res) => {
 
 router.post('/accounts', async (req, res) => {
   try {
-    const row = await accounting.createAccount(req.body)
+    const row = await accounting.createAccount({
+      ...req.body,
+      created_by: req.user?.id || null,
+    })
     ok(res, row)
   } catch (e) { fail(res, e) }
 })
