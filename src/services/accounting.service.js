@@ -200,6 +200,68 @@ export async function ensureAccountingTables() {
   if (!jtRows.length) {
     await query(`INSERT INTO journal_types (name_ar, sort_order) VALUES ('قيد يومي', 1)`)
   }
+
+  await backfillFinancialStatements()
+}
+
+function normalizeArabicName(value) {
+  return String(value || '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+export function inferFinancialStatement(nameAr, parentFinancial = null) {
+  if (parentFinancial) return parentFinancial
+
+  const name = normalizeArabicName(nameAr)
+  if (!name) return null
+
+  if (/اصول|خصوم|ملكيه|مطلوبات|التزامات|نقديه|بنوك|صناديق/.test(name)) {
+    return 'الميزانية العمومية'
+  }
+
+  if (/ايراد|مصروف|مبيعات|تكلفه|ربح|خسار/.test(name)) {
+    return 'أرباح وخسائر'
+  }
+
+  return null
+}
+
+async function getParentFinancialStatement(parentId) {
+  if (!parentId) return null
+  const { rows } = await query(
+    'SELECT financial_statement FROM accounting_accounts WHERE id = $1',
+    [parentId]
+  )
+  return rows[0]?.financial_statement || null
+}
+
+async function resolveFinancialStatement(data) {
+  if (data.financial_statement) return data.financial_statement
+
+  const fromParent = await getParentFinancialStatement(data.parent_id)
+  if (fromParent) return fromParent
+
+  return inferFinancialStatement(data.name_ar)
+}
+
+async function backfillFinancialStatements() {
+  const { rows } = await query(
+    `SELECT id, name_ar, parent_id, financial_statement FROM accounting_accounts
+     WHERE financial_statement IS NULL OR financial_statement = ''`
+  )
+
+  for (const row of rows) {
+    const fromParent = await getParentFinancialStatement(row.parent_id)
+    const financial = fromParent || inferFinancialStatement(row.name_ar)
+    if (!financial) continue
+    await query('UPDATE accounting_accounts SET financial_statement = $1 WHERE id = $2', [
+      financial,
+      row.id,
+    ])
+  }
 }
 
 function mapAccount(row) {
@@ -297,6 +359,7 @@ export async function createAccount(data) {
   const parentId = data.parent_id || null
   const level = data.account_level || (parentId ? 'فرعي' : 'رئيسي')
   const code = await nextAccountCode(parentId)
+  const financialStatement = await resolveFinancialStatement({ ...data, parent_id: parentId })
   const { insertId } = await query(
     `INSERT INTO accounting_accounts
      (code, name_ar, name_en, parent_id, account_group_id, account_level, financial_statement, created_by)
@@ -308,14 +371,17 @@ export async function createAccount(data) {
       parentId,
       data.account_group_id || null,
       level,
-      data.financial_statement || null,
+      financialStatement,
       data.created_by || null,
     ]
   )
-  return { id: insertId, code }
+  return { id: insertId, code, financial_statement: financialStatement }
 }
 
 export async function updateAccount(id, data) {
+  const financialStatement = data.financial_statement
+    ?? (data.name_ar ? inferFinancialStatement(data.name_ar) : null)
+
   await query(
     `UPDATE accounting_accounts SET
       name_ar = COALESCE($2, name_ar),
@@ -332,7 +398,7 @@ export async function updateAccount(id, data) {
       data.parent_id ?? null,
       data.account_group_id ?? null,
       data.account_level,
-      data.financial_statement ?? null,
+      financialStatement,
     ]
   )
 }
