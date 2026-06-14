@@ -263,4 +263,7 @@ export async function migrate() {
     await pool.execute('DELETE FROM batches')
     console.log('All batches cleared (CLEAR_LEGACY_BATCHES=1)')
   }
+
+  const { ensureAccountingTables } = await import('../services/accounting.service.js')
+  await ensureAccountingTables()
 }
