@@ -248,19 +248,23 @@ async function resolveFinancialStatement(data) {
 }
 
 async function backfillFinancialStatements() {
-  const { rows } = await query(
-    `SELECT id, name_ar, parent_id, financial_statement FROM accounting_accounts
-     WHERE financial_statement IS NULL OR financial_statement = ''`
-  )
+  try {
+    const { rows } = await query(
+      `SELECT id, name_ar, parent_id, financial_statement FROM accounting_accounts
+       WHERE financial_statement IS NULL OR financial_statement = ''`
+    )
 
-  for (const row of rows) {
-    const fromParent = await getParentFinancialStatement(row.parent_id)
-    const financial = fromParent || inferFinancialStatement(row.name_ar)
-    if (!financial) continue
-    await query('UPDATE accounting_accounts SET financial_statement = $1 WHERE id = $2', [
-      financial,
-      row.id,
-    ])
+    for (const row of rows) {
+      const fromParent = await getParentFinancialStatement(row.parent_id)
+      const financial = fromParent || inferFinancialStatement(row.name_ar)
+      if (!financial) continue
+      await query('UPDATE accounting_accounts SET financial_statement = $1 WHERE id = $2', [
+        financial,
+        row.id,
+      ])
+    }
+  } catch (error) {
+    console.warn('account financial_statement backfill skipped:', error.message)
   }
 }
 
@@ -291,7 +295,7 @@ const ACCOUNT_LIST_SQL = `
   FROM accounting_accounts aa
   LEFT JOIN accounting_accounts p ON p.id = aa.parent_id
   LEFT JOIN account_groups ag ON ag.id = aa.account_group_id
-  LEFT JOIN users u ON u.id = aa.created_by
+  LEFT JOIN platform_users u ON u.id = aa.created_by
 `
 
 function buildTree(list) {
@@ -713,7 +717,7 @@ export async function listReceiptVouchers() {
      FROM receipt_vouchers rv
      LEFT JOIN currencies c ON c.id = rv.currency_id
      LEFT JOIN accounting_accounts aa ON aa.id = rv.account_id
-     LEFT JOIN users u ON u.id = rv.created_by
+     LEFT JOIN platform_users u ON u.id = rv.created_by
      ORDER BY rv.id DESC`
   )
   return rows.map((r) => ({ ...r, branch_name: null }))
@@ -775,7 +779,7 @@ export async function listPaymentVouchers() {
      FROM payment_vouchers pv
      LEFT JOIN currencies c ON c.id = pv.currency_id
      LEFT JOIN accounting_accounts aa ON aa.id = pv.account_id
-     LEFT JOIN users u ON u.id = pv.created_by
+     LEFT JOIN platform_users u ON u.id = pv.created_by
      ORDER BY pv.id DESC`
   )
   return rows.map((r) => ({ ...r, branch_name: null, paymentTypeName: null }))
