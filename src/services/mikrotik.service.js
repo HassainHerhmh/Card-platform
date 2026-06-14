@@ -802,9 +802,45 @@ function formatTotalTraffic(bytesIn, bytesOut) {
   return formatTrafficAmount(total)
 }
 
-function formatUptimeDisplay(value) {
+function parseRosDurationToSeconds(value) {
+  if (value == null || value === '' || value === '0' || value === '0s') return 0
+  const raw = String(value).trim().toLowerCase()
+  const hms = raw.match(/^(\d+):(\d{2}):(\d{2})$/)
+  if (hms) {
+    return Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])
+  }
+  let total = 0
+  const parts = [...raw.matchAll(/(\d+)([wdhms])/g)]
+  if (parts.length) {
+    for (const [, n, unit] of parts) {
+      const num = Number(n)
+      if (unit === 'w') total += num * 7 * 24 * 3600
+      else if (unit === 'd') total += num * 24 * 3600
+      else if (unit === 'h') total += num * 3600
+      else if (unit === 'm') total += num * 60
+      else if (unit === 's') total += num
+    }
+    return total
+  }
+  const parsed = parseRosTime(value)
+  if (!parsed) return 0
+  return parsed.hours * 3600 + parsed.minutes * 60
+}
+
+function formatRosDurationToHms(value) {
   if (value == null || value === '' || value === '0' || value === '0s') return '0'
-  return String(value).trim()
+  const raw = String(value).trim()
+  if (/^\d+:\d{2}:\d{2}$/.test(raw)) return raw
+  const totalSec = parseRosDurationToSeconds(value)
+  if (totalSec <= 0) return '0'
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function formatUptimeDisplay(value) {
+  return formatRosDurationToHms(value)
 }
 
 function formatLastSeen(value) {
@@ -880,11 +916,7 @@ function finishInventoryCard(card, extras = {}) {
 }
 
 function parseUsageSeconds(value) {
-  const hms = parseTimeHms(String(value || ''))
-  if (hms) return hms.hours * 3600 + hms.minutes * 60
-  const parsed = parseRosTime(value)
-  if (!parsed) return 0
-  return parsed.hours * 3600 + parsed.minutes * 60
+  return parseRosDurationToSeconds(value)
 }
 
 function resolveUserManagerCardStatus(user, activeUsernames) {
