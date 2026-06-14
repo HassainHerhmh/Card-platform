@@ -188,6 +188,12 @@ export async function ensureAccountingTables() {
     if (error.code !== 'ER_DUP_FIELDNAME') throw error
   }
 
+  try {
+    await query('ALTER TABLE agents ADD COLUMN account_id INT NULL')
+  } catch (error) {
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error
+  }
+
   const { rows: currencyRows } = await query('SELECT id FROM currencies LIMIT 1')
   if (!currencyRows.length) {
     await query(
@@ -348,6 +354,42 @@ export async function listSubAccounts() {
     `${ACCOUNT_LIST_SQL} WHERE aa.account_level = 'فرعي' ORDER BY aa.code`
   )
   return rows.map(mapAccount)
+}
+
+export async function validateSubAccount(accountId) {
+  if (!accountId) return null
+  const { rows } = await query(
+    `SELECT id, code, name_ar FROM accounting_accounts WHERE id = $1 AND account_level = 'فرعي'`,
+    [accountId]
+  )
+  if (!rows[0]) throw new Error('يجب اختيار حساب فرعي صالح من دليل الحسابات')
+  return rows[0]
+}
+
+export async function getAccountsBalances(accountIds = []) {
+  const ids = [...new Set(accountIds.filter(Boolean))]
+  if (!ids.length) return {}
+
+  const placeholders = ids.map((_, index) => `$${index + 1}`).join(', ')
+  const { rows } = await query(
+    `SELECT account_id, COALESCE(SUM(debit), 0) - COALESCE(SUM(credit), 0) AS balance
+     FROM journal_entries
+     WHERE account_id IN (${placeholders})
+     GROUP BY account_id`,
+    ids
+  )
+
+  const balances = {}
+  for (const row of rows) {
+    balances[row.account_id] = Number(row.balance)
+  }
+  return balances
+}
+
+export async function getAccountBalance(accountId) {
+  if (!accountId) return null
+  const balances = await getAccountsBalances([accountId])
+  return balances[accountId] ?? 0
 }
 
 export async function listMainAccountsForEntity(_entityType) {
