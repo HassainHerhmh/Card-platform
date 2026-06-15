@@ -106,22 +106,39 @@ function mapConnectionError(error) {
   return msg
 }
 
-/** عدّ سريع بدون جلب كل السجلات — للمراقبة فقط */
-async function printCount(api, path, queryArgs = []) {
+/** عدّ سريع — يحاول count-only ثم عدّ السجلات مباشرة (متوافق مع RouterOS 6) */
+async function countRecords(api, path, queryArgs = []) {
   try {
     const rows = await api.write(path, [...queryArgs, '=count-only='])
-    if (!rows?.length) return 0
-    const row = rows[0]
-    if (row.ret !== undefined && row.ret !== null && row.ret !== '') {
-      return Number(row.ret) || 0
+    if (rows?.[0]?.ret !== undefined && rows[0].ret !== null && rows[0].ret !== '') {
+      const counted = Number(rows[0].ret) || 0
+      if (counted > 0) return counted
     }
-    return 0
+  } catch {
+    // fallback below
+  }
+
+  try {
+    const rows = await api.write(path, queryArgs)
+    return Array.isArray(rows) ? rows.length : 0
   } catch {
     return 0
   }
 }
 
+async function printCount(api, path, queryArgs = []) {
+  return countRecords(api, path, queryArgs)
+}
+
 async function countActiveUserManagerSessions(api) {
+  try {
+    const users = await api.write('/tool/user-manager/user/print', ['=.proplist=active-sessions'])
+    const fromUsers = (users || []).reduce((sum, row) => sum + (Number(row['active-sessions']) || 0), 0)
+    if (fromUsers > 0) return fromUsers
+  } catch {
+    // fallback below
+  }
+
   try {
     const rows = await api.write('/tool/user-manager/session/print', ['?active=yes', '=count-only='])
     if (rows?.[0]?.ret !== undefined && rows[0].ret !== null && rows[0].ret !== '') {
@@ -132,14 +149,32 @@ async function countActiveUserManagerSessions(api) {
   }
 
   try {
-    const rows = await api.write('/tool/user-manager/session/print', ['=.proplist=active'])
+    const rows = await api.write('/tool/user-manager/session/print', ['=.proplist=active,ended'])
     return (rows || []).filter((row) => {
       const active = row.active
-      return active === true || active === 'true' || active === 'yes'
+      const ended = row.ended
+      const isActive = active === true || active === 'true' || active === 'yes'
+      const notEnded = ended === undefined || ended === null || ended === '' || ended === 'false' || ended === false
+      return isActive && notEnded
     }).length
   } catch {
     return 0
   }
+}
+
+async function countConnectedNeighbors(api) {
+  const paths = [
+    '/ip/neighbor/print',
+    '/interface/wireless/registration-table/print',
+    '/caps-man/registration-table/print',
+  ]
+
+  for (const path of paths) {
+    const count = await countRecords(api, path)
+    if (count > 0) return count
+  }
+
+  return 0
 }
 
 async function fetchUserManagerStatusLite(api) {
@@ -213,14 +248,15 @@ export async function getRouterStatus() {
         printCount(api, '/ip/hotspot/user/print'),
         printCount(api, '/ip/hotspot/active/print'),
         fetchUserManagerStatusLite(api),
-        printCount(api, '/ip/neighbor/print').catch(() => 0),
+        countConnectedNeighbors(api),
       ])
 
       const { userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, userManager } = umLite
 
       const identity = identityRows?.[0] || {}
       const resource = resourceRows?.[0] || {}
-      const connectedUsers = activeHotspotUsers + activeUserManagerSessions
+      // المتصلون = نفس «متصل» في صفحة ميكروتك (Hotspot active)
+      const connectedUsers = activeHotspotUsers
 
       return {
         connected: true,
