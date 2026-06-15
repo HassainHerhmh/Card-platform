@@ -1,9 +1,23 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
-import { fetchUserManagerProfilesOnly, syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
+import { fetchUserManagerProfilesOnly, getHotspotProfiles, syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
 import { ROUTER_SOURCE } from '../constants/routerSource.js'
 
 const AGENT_APP_ROUTER_SOURCE = ROUTER_SOURCE.USER_MANAGER
+
+function isUserManagerCategory(profile, umProfileNames, hotspotProfileNames) {
+  if (!profile) return false
+
+  if (umProfileNames) {
+    return umProfileNames.has(profile)
+  }
+
+  if (hotspotProfileNames) {
+    return !hotspotProfileNames.has(profile)
+  }
+
+  return true
+}
 
 export async function getNetworks() {
   const { rows } = await query(
@@ -32,18 +46,34 @@ export async function getNetworkById(id) {
 }
 
 export async function getCategoriesForAgent(agentId) {
+  let umProfileNames = null
+  let hotspotProfileNames = null
+
+  const [umResult, hotspotResult] = await Promise.allSettled([
+    fetchUserManagerProfilesOnly(),
+    getHotspotProfiles(),
+  ])
+
+  if (umResult.status === 'fulfilled') {
+    umProfileNames = new Set(
+      (umResult.value.profiles || []).map((p) => p.name).filter(Boolean)
+    )
+  } else {
+    console.warn('[agent-app] UM profile fetch skipped:', umResult.reason?.message)
+  }
+
+  if (hotspotResult.status === 'fulfilled') {
+    hotspotProfileNames = new Set(
+      hotspotResult.value.map((p) => p.name).filter(Boolean)
+    )
+  } else {
+    console.warn('[agent-app] Hotspot profile fetch skipped:', hotspotResult.reason?.message)
+  }
+
   try {
     await syncAgentPendingCardsWithRouter(agentId)
   } catch (error) {
     console.warn('[agent-app] router card sync skipped:', error.message)
-  }
-
-  let umProfileNames = null
-  try {
-    const um = await fetchUserManagerProfilesOnly()
-    umProfileNames = new Set((um.profiles || []).map((p) => p.name).filter(Boolean))
-  } catch (error) {
-    console.warn('[agent-app] UM profile fetch skipped:', error.message)
   }
 
   const { rows } = await query(
@@ -62,9 +92,9 @@ export async function getCategoriesForAgent(agentId) {
     [agentId, AGENT_APP_ROUTER_SOURCE]
   )
 
-  const filtered = umProfileNames
-    ? rows.filter((row) => umProfileNames.has(row.routerProfile))
-    : rows
+  const filtered = rows.filter((row) =>
+    isUserManagerCategory(row.routerProfile, umProfileNames, hotspotProfileNames)
+  )
 
   return filtered.map((row) => ({
     id: row.id,
