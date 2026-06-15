@@ -1,23 +1,9 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
-import { fetchUserManagerProfilesOnly, getHotspotProfiles, syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
+import { syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
 import { ROUTER_SOURCE } from '../constants/routerSource.js'
 
 const AGENT_APP_ROUTER_SOURCE = ROUTER_SOURCE.USER_MANAGER
-
-function isUserManagerCategory(profile, umProfileNames, hotspotProfileNames) {
-  if (!profile) return false
-
-  if (umProfileNames) {
-    return umProfileNames.has(profile)
-  }
-
-  if (hotspotProfileNames) {
-    return !hotspotProfileNames.has(profile)
-  }
-
-  return true
-}
 
 export async function getNetworks() {
   const { rows } = await query(
@@ -46,39 +32,12 @@ export async function getNetworkById(id) {
 }
 
 export async function getCategoriesForAgent(agentId) {
-  let umProfileNames = null
-  let hotspotProfileNames = null
-
-  const [umResult, hotspotResult] = await Promise.allSettled([
-    fetchUserManagerProfilesOnly(),
-    getHotspotProfiles(),
-  ])
-
-  if (umResult.status === 'fulfilled') {
-    umProfileNames = new Set(
-      (umResult.value.profiles || []).map((p) => p.name).filter(Boolean)
-    )
-  } else {
-    console.warn('[agent-app] UM profile fetch skipped:', umResult.reason?.message)
-  }
-
-  if (hotspotResult.status === 'fulfilled') {
-    hotspotProfileNames = new Set(
-      hotspotResult.value.map((p) => p.name).filter(Boolean)
-    )
-  } else {
-    console.warn('[agent-app] Hotspot profile fetch skipped:', hotspotResult.reason?.message)
-  }
-
-  try {
-    await syncAgentPendingCardsWithRouter(agentId)
-  } catch (error) {
+  syncAgentPendingCardsWithRouter(agentId).catch((error) => {
     console.warn('[agent-app] router card sync skipped:', error.message)
-  }
+  })
 
   const { rows } = await query(
     `SELECT c.id, c.name, c.price, c.duration, c.data_quota AS dataQuota,
-            c.router_profile AS routerProfile,
             COUNT(CASE WHEN ca.status = 'معلق' THEN 1 END) AS availableCards
      FROM categories c
      LEFT JOIN batches b ON b.category_id = c.id
@@ -87,16 +46,21 @@ export async function getCategoriesForAgent(agentId) {
      LEFT JOIN cards ca ON ca.batch_id = b.id
      WHERE c.router_source = $2
        AND c.router_profile IS NOT NULL
+       AND c.router_profile NOT IN (
+         SELECT DISTINCT hs.router_profile
+         FROM categories hs
+         LEFT JOIN categories um ON um.router_profile = hs.router_profile
+           AND um.router_source = 'user-manager'
+         WHERE hs.router_source = 'hotspot'
+           AND hs.router_profile IS NOT NULL
+           AND um.id IS NULL
+       )
      GROUP BY c.id, c.name, c.price, c.duration, c.data_quota, c.router_profile
      ORDER BY c.id`,
     [agentId, AGENT_APP_ROUTER_SOURCE]
   )
 
-  const filtered = rows.filter((row) =>
-    isUserManagerCategory(row.routerProfile, umProfileNames, hotspotProfileNames)
-  )
-
-  return filtered.map((row) => ({
+  return rows.map((row) => ({
     id: row.id,
     name: row.name,
     price: Number(row.price),
