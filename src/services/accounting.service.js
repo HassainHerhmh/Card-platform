@@ -934,8 +934,8 @@ export async function listJournalEntriesGrouped() {
             MAX(je.notes) AS notes,
             MAX(c.name_ar) AS currency_name,
             SUM(CASE WHEN je.debit > 0 THEN je.debit ELSE 0 END) AS amount,
-            MAX(CASE WHEN je.credit > 0 THEN aa.name_ar END) AS from_account,
-            MAX(CASE WHEN je.debit > 0 THEN aa.name_ar END) AS to_account
+            MAX(CASE WHEN je.debit > 0 THEN aa.name_ar END) AS from_account,
+            MAX(CASE WHEN je.credit > 0 THEN aa.name_ar END) AS to_account
      FROM journal_entries je
      LEFT JOIN accounting_accounts aa ON aa.id = je.account_id
      LEFT JOIN currencies c ON c.id = je.currency_id
@@ -1065,8 +1065,8 @@ export async function postCardBatchDeliveryJournal({
     notes: String(description || '').slice(0, 500),
   }
 
-  await insertJournalLine({ ...base, account_id: transitAccountId, debit: amount, credit: 0 })
-  await insertJournalLine({ ...base, account_id: agentAccountId, debit: 0, credit: amount })
+  await insertJournalLine({ ...base, account_id: agentAccountId, debit: amount, credit: 0 })
+  await insertJournalLine({ ...base, account_id: transitAccountId, debit: 0, credit: amount })
 }
 
 export async function hasBatchDeliveryJournal(batchId) {
@@ -1087,6 +1087,43 @@ export async function getLocalJournalDate() {
     return value.toISOString().slice(0, 10)
   }
   return String(value).slice(0, 10)
+}
+
+export async function correctCardBatchJournalDirections() {
+  const settings = await getTransitAccounts()
+  const transitAccountId = settings.card_income_account || settings.commission_income_account
+  if (!transitAccountId) return { corrected: 0 }
+
+  const { rows: refs } = await query(
+    `SELECT DISTINCT reference_id AS batchId
+     FROM journal_entries
+     WHERE reference_type = 'card_batch'`
+  )
+
+  let corrected = 0
+  for (const row of refs) {
+    const batchId = row.batchId ?? row.reference_id
+    const { rows: lines } = await query(
+      `SELECT id, account_id, debit, credit
+       FROM journal_entries
+       WHERE reference_type = 'card_batch' AND reference_id = $1`,
+      [batchId]
+    )
+    if (lines.length < 2) continue
+
+    const agentLine = lines.find((line) => Number(line.account_id) !== Number(transitAccountId))
+    if (!agentLine || Number(agentLine.credit) <= 0) continue
+
+    for (const line of lines) {
+      await query(
+        'UPDATE journal_entries SET debit = $2, credit = $3 WHERE id = $1',
+        [line.id, line.credit, line.debit]
+      )
+    }
+    corrected += 1
+  }
+
+  return { corrected }
 }
 
 export async function saveTransitAccounts(data) {

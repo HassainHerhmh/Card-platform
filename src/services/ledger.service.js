@@ -6,6 +6,7 @@ import {
   hasBatchDeliveryJournal,
   getTransitAccounts,
   getLocalJournalDate,
+  correctCardBatchJournalDirections,
 } from './accounting.service.js'
 
 async function getAgentRow(agentId) {
@@ -125,6 +126,8 @@ export async function recordBatchDelivery({ agentId, batchId, categoryName, coun
 }
 
 export async function syncMissingBatchJournals({ limit = 100 } = {}) {
+  await correctCardBatchJournalDirections()
+
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500)
   const { rows } = await query(
     `SELECT b.id AS batchId, b.category_name AS categoryName, b.count, b.printed_at AS printedAt,
