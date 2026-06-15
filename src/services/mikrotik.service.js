@@ -369,7 +369,7 @@ function resolveCardStatus(user, activeUsernames, usageCheck = hasCardUsage) {
   if (usageCheck(user)) {
     return { status: 'expired', label: 'منتهي' }
   }
-  return { status: 'available', label: 'نشط' }
+  return { status: 'available', label: 'انتظار' }
 }
 
 export async function getHotspotInventory() {
@@ -1206,6 +1206,15 @@ let routerInventoryCacheAt = 0
 let routerInventoryBuildPromise = null
 const ROUTER_INVENTORY_CACHE_MS = 24 * 60 * 60 * 1000
 
+let routerEnrichmentIndex = null
+let routerEnrichmentIndexAt = 0
+const ROUTER_ENRICHMENT_INDEX_MS = 2 * 60 * 1000
+
+function invalidateRouterEnrichmentIndex() {
+  routerEnrichmentIndex = null
+  routerEnrichmentIndexAt = 0
+}
+
 async function loadPersistedRouterInventory() {
   try {
     const { rows } = await query(
@@ -1296,6 +1305,63 @@ async function printWithProplistFallback(api, path, proplist) {
   }
 }
 
+async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
+  const now = Date.now()
+  if (!refresh && routerEnrichmentIndex && now - routerEnrichmentIndexAt < ROUTER_ENRICHMENT_INDEX_MS) {
+    return routerEnrichmentIndex
+  }
+
+  let userManagerAvailable = true
+
+  const [activeHotspotSessions, umSessionsRaw] = await Promise.all([
+    api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
+    api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
+  ])
+
+  const hotspotIndex = {
+    byName: new Map(),
+    activeUsernames: new Set((activeHotspotSessions || []).map((s) => s.user).filter(Boolean)),
+    activeSessions: activeHotspotSessions || [],
+  }
+
+  const umIndex = {
+    byName: new Map(),
+    activeUsernames: new Set((umSessionsRaw || []).flatMap((s) => [s.user, s.username].filter(Boolean))),
+    sessions: umSessionsRaw || [],
+  }
+
+  const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
+    printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
+    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0]).catch((error) => {
+      if (isUserManagerUnavailable(error)) {
+        userManagerAvailable = false
+        return []
+      }
+      throw error
+    }),
+  ])
+
+  for (const u of hotspotUsersRaw || []) {
+    const row = mapHotspotUserRow(u)
+    if (row.name) hotspotIndex.byName.set(row.name, row)
+  }
+
+  for (const u of umUsersRaw || []) {
+    const row = mapUserManagerUserRow(u)
+    if (row.name) umIndex.byName.set(row.name, row)
+  }
+
+  routerEnrichmentIndex = {
+    hotspotIndex,
+    umIndex,
+    userManagerAvailable,
+    hotspotOk: true,
+    umOk: userManagerAvailable,
+  }
+  routerEnrichmentIndexAt = Date.now()
+  return routerEnrichmentIndex
+}
+
 async function buildRouterInventorySnapshot(api) {
   const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw, umUserCount] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
@@ -1353,6 +1419,7 @@ async function getCachedRouterInventory({ refresh = false } = {}) {
   if (refresh) {
     routerInventoryCache = null
     routerInventoryCacheAt = 0
+    invalidateRouterEnrichmentIndex()
   }
 
   const now = Date.now()
@@ -1502,12 +1569,24 @@ async function fetchHotspotUsersIndexed(api, codeSet) {
   const byName = new Map()
   const proplist = ['=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out']
 
-  if (codeSet.size > 0 && codeSet.size <= 400) {
-    const codes = [...codeSet]
+  if (!codeSet.size) {
+    return { byName, activeUsernames, activeSessions: activeSessions || [] }
+  }
+
+  try {
+    const usersRaw = await printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0])
+    for (const u of usersRaw || []) {
+      if (u.name && codeSet.has(u.name)) byName.set(u.name, mapHotspotUserRow(u))
+    }
+  } catch {
+    // fall back to per-code lookup below
+  }
+
+  const unresolved = [...codeSet].filter((c) => !byName.has(c))
+  if (unresolved.length > 0) {
     const batchSize = 30
-    for (let i = 0; i < codes.length; i += batchSize) {
-      const batch = codes.slice(i, i + batchSize)
-      await Promise.all(batch.map(async (code) => {
+    for (let i = 0; i < unresolved.length; i += batchSize) {
+      await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
         try {
           const rows = await api.write('/ip/hotspot/user/print', [`?name=${code}`, ...proplist])
           if (rows?.[0]?.name) byName.set(rows[0].name, mapHotspotUserRow(rows[0]))
@@ -1515,11 +1594,6 @@ async function fetchHotspotUsersIndexed(api, codeSet) {
           // skip missing
         }
       }))
-    }
-  } else if (codeSet.size > 400) {
-    const usersRaw = await api.write('/ip/hotspot/user/print', proplist)
-    for (const u of usersRaw || []) {
-      if (u.name && codeSet.has(u.name)) byName.set(u.name, mapHotspotUserRow(u))
     }
   }
 
@@ -1555,19 +1629,124 @@ function mapDbRowToPlaceholderCard(dbRow, statusLabel = 'جاري التحقق �
   })
 }
 
-const ROUTER_ENRICH_TIMEOUT_MS = 20000
+const ROUTER_ENRICH_TIMEOUT_MS = 60000
 
-async function enrichDbRowsWithRouterSafe(dbRows) {
+function enrichDbRowsFromSnapshot(dbRows, snapshot) {
+  const byName = new Map()
+  for (const card of snapshot.cards || []) {
+    if (card.name) byName.set(card.name, card)
+  }
+
+  const cards = []
+  const missingCodes = []
+
+  for (const dbRow of dbRows) {
+    const routerCard = byName.get(dbRow.code)
+    if (!routerCard) {
+      missingCodes.push(dbRow.code)
+      continue
+    }
+    cards.push({
+      ...routerCard,
+      printedAt: dbRow.printedAt,
+      dbStatus: dbRow.dbStatus,
+      serialNumber: dbRow.cardId != null ? String(dbRow.cardId) : (routerCard.serialNumber || ''),
+      pointOfSale: dbRow.agentName || routerCard.pointOfSale || '',
+    })
+  }
+
+  return { cards, missingCodes }
+}
+
+function lookupDbRowsWithRouterIndex(dbRows, { hotspotIndex, umIndex }) {
+  const cards = []
+  const missingCodes = []
+
+  for (const dbRow of dbRows) {
+    const source = normalizeRouterSource(dbRow.routerSource)
+    const cardWithDate = {
+      printedAt: dbRow.printedAt,
+      dbStatus: dbRow.dbStatus,
+      serialNumber: dbRow.cardId != null ? String(dbRow.cardId) : undefined,
+      pointOfSale: dbRow.agentName || undefined,
+    }
+
+    if (source === ROUTER_SOURCE.USER_MANAGER) {
+      const row = umIndex.byName.get(dbRow.code)
+      if (!row) {
+        missingCodes.push(dbRow.code)
+        continue
+      }
+      cards.push({
+        ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions),
+        ...cardWithDate,
+      })
+      continue
+    }
+
+    const row = hotspotIndex.byName.get(dbRow.code)
+    if (!row) {
+      missingCodes.push(dbRow.code)
+      continue
+    }
+    cards.push({
+      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
+      ...cardWithDate,
+    })
+  }
+
+  return { cards, missingCodes }
+}
+
+async function enrichDbRowsWithRouterSafe(dbRows, options = {}) {
   try {
     return await Promise.race([
-      enrichDbRowsWithRouter(dbRows),
+      enrichDbRowsWithRouter(dbRows, options),
       new Promise((_, reject) => {
         setTimeout(() => reject(new Error('ROUTER_INVENTORY_TIMEOUT')), ROUTER_ENRICH_TIMEOUT_MS)
       }),
     ])
   } catch (error) {
     if (error.message === 'ROUTER_INVENTORY_TIMEOUT') {
-      console.warn('[mikrotik] inventory enrich timeout')
+      console.warn('[mikrotik] inventory enrich timeout — using cache fallback')
+
+      if (routerEnrichmentIndex) {
+        const { cards, missingCodes } = lookupDbRowsWithRouterIndex(dbRows, routerEnrichmentIndex)
+        if (cards.length) {
+          return {
+            cards,
+            purged: 0,
+            sources: {
+              hotspot: routerEnrichmentIndex.hotspotOk,
+              userManager: routerEnrichmentIndex.userManagerAvailable && routerEnrichmentIndex.umOk,
+            },
+            userManager: {
+              available: routerEnrichmentIndex.userManagerAvailable,
+              customers: [],
+              defaultCustomer: null,
+              profiles: 0,
+            },
+            partial: true,
+            missingCodes,
+          }
+        }
+      }
+
+      const snapshot = await getCachedRouterInventory({ refresh: false })
+      if (snapshot) {
+        const { cards, missingCodes } = enrichDbRowsFromSnapshot(dbRows, snapshot)
+        if (cards.length) {
+          return {
+            cards,
+            purged: 0,
+            sources: snapshot.sources,
+            userManager: snapshot.userManager,
+            partial: true,
+            missingCodes,
+          }
+        }
+      }
+
       return {
         cards: dbRows.map((row) => mapDbRowToPlaceholderCard(row, 'تعذر الاتصال بالراوتر')),
         sources: { hotspot: false, userManager: false },
@@ -1614,7 +1793,7 @@ async function purgeStaleCardsFromDb(codes) {
   return affectedRows || unique.length
 }
 
-async function enrichDbRowsWithRouter(dbRows) {
+async function enrichDbRowsWithRouter(dbRows, { refresh = false } = {}) {
   if (!dbRows.length) {
     return {
       cards: [],
@@ -1623,66 +1802,14 @@ async function enrichDbRowsWithRouter(dbRows) {
     }
   }
 
-  const codesBySource = { hotspot: new Set(), 'user-manager': new Set() }
-  for (const row of dbRows) {
-    const source = normalizeRouterSource(row.routerSource)
-    codesBySource[source === ROUTER_SOURCE.USER_MANAGER ? 'user-manager' : 'hotspot'].add(row.code)
-  }
-
-  let hotspotIndex = { byName: new Map(), activeUsernames: new Set(), activeSessions: [] }
-  let umIndex = { byName: new Map(), activeUsernames: new Set(), sessions: [] }
-  let userManagerAvailable = true
-  let hotspotOk = false
-  let umOk = false
+  const refreshRequested = refresh === true || refresh === '1'
+  let index = null
 
   await withConnection(async (api) => {
-    if (codesBySource.hotspot.size > 0) {
-      hotspotIndex = await fetchHotspotUsersIndexed(api, codesBySource.hotspot)
-      hotspotOk = true
-    }
-    if (codesBySource['user-manager'].size > 0) {
-      try {
-        umIndex = await fetchUserManagerUsersIndexed(api, codesBySource['user-manager'])
-        umOk = true
-      } catch (error) {
-        if (isUserManagerUnavailable(error)) userManagerAvailable = false
-        else throw error
-      }
-    }
+    index = await getRouterEnrichmentIndex(api, { refresh: refreshRequested })
   })
 
-  const cards = []
-  const missingCodes = []
-
-  for (const dbRow of dbRows) {
-    const source = normalizeRouterSource(dbRow.routerSource)
-    const cardWithDate = {
-      printedAt: dbRow.printedAt,
-      dbStatus: dbRow.dbStatus,
-      serialNumber: dbRow.cardId != null ? String(dbRow.cardId) : undefined,
-      pointOfSale: dbRow.agentName || undefined,
-    }
-
-    if (source === ROUTER_SOURCE.USER_MANAGER) {
-      const row = umIndex.byName.get(dbRow.code)
-      if (!row) {
-        missingCodes.push(dbRow.code)
-        continue
-      }
-      cards.push({ ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions), ...cardWithDate })
-      continue
-    }
-
-    const row = hotspotIndex.byName.get(dbRow.code)
-    if (!row) {
-      missingCodes.push(dbRow.code)
-      continue
-    }
-    cards.push({
-      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
-      ...cardWithDate,
-    })
-  }
+  const { cards, missingCodes } = lookupDbRowsWithRouterIndex(dbRows, index)
 
   let purged = 0
   if (missingCodes.length) {
@@ -1694,11 +1821,11 @@ async function enrichDbRowsWithRouter(dbRows) {
     cards,
     purged,
     sources: {
-      hotspot: hotspotOk || codesBySource.hotspot.size === 0,
-      userManager: userManagerAvailable && (umOk || codesBySource['user-manager'].size === 0),
+      hotspot: index.hotspotOk,
+      userManager: index.userManagerAvailable && index.umOk,
     },
     userManager: {
-      available: userManagerAvailable,
+      available: index.userManagerAvailable,
       customers: [],
       defaultCustomer: null,
       profiles: 0,
@@ -1713,12 +1840,25 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
   )
 
   const byName = new Map()
+  if (!codeSet.size) {
+    return { byName, activeUsernames, sessions: sessions || [] }
+  }
 
-  if (codeSet.size > 0 && codeSet.size <= 400) {
-    const codes = [...codeSet]
+  try {
+    const usersRaw = await printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0])
+    for (const u of usersRaw || []) {
+      const name = u.username || u.name
+      if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
+    }
+  } catch {
+    // fall back to per-code lookup below
+  }
+
+  const unresolved = [...codeSet].filter((c) => !byName.has(c))
+  if (unresolved.length > 0) {
     const batchSize = 30
-    for (let i = 0; i < codes.length; i += batchSize) {
-      await Promise.all(codes.slice(i, i + batchSize).map(async (code) => {
+    for (let i = 0; i < unresolved.length; i += batchSize) {
+      await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
         for (const queryWord of [`?username=${code}`, `?name=${code}`]) {
           try {
             const rows = await api.write('/tool/user-manager/user/print', [queryWord])
@@ -1732,27 +1872,6 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
           }
         }
       }))
-    }
-  } else if (codeSet.size > 400) {
-    const usersRaw = await api.write('/tool/user-manager/user/print')
-    for (const u of usersRaw || []) {
-      const name = u.username || u.name
-      if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
-    }
-  }
-
-  const unresolved = [...codeSet].filter((c) => !byName.has(c))
-  if (unresolved.length > 0 && codeSet.size <= 400) {
-    try {
-      const usersRaw = await api.write('/tool/user-manager/user/print')
-      for (const u of usersRaw || []) {
-        const name = u.username || u.name
-        if (name && codeSet.has(name) && !byName.has(name)) {
-          byName.set(name, mapUserManagerUserRow(u))
-        }
-      }
-    } catch {
-      // ignore fallback scan failure
     }
   }
 
@@ -1876,7 +1995,7 @@ export async function getCombinedInventory(options = {}) {
   }
 
   try {
-    const enriched = await enrichDbRowsWithRouterSafe(dbRows)
+    const enriched = await enrichDbRowsWithRouterSafe(dbRows, { refresh: options.refresh })
     const loaded = Math.min(offset + enriched.cards.length, total || offset + enriched.cards.length)
     const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 100
 

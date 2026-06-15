@@ -1,7 +1,7 @@
 import { query } from '../db/pool.js'
 import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
-import { generateCardCode, buildCardCredentials, CARD_FORMAT } from '../utils/cardCode.js'
+import { buildCardCredentials, CARD_FORMAT } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
 import { pushRouterUsers } from './mikrotik.service.js'
 import {
@@ -72,15 +72,12 @@ export async function createBatch({
   const settings = await getCardSettings()
   const status = agentName !== '-' ? 'معلق' : 'مطبوع'
 
-  const codes = Array.from({ length: printCount }, () =>
-    generateCardCode({ digits: settings.digits, chars: settings.chars })
-  )
-
-  const entries = codes.map((rawCode) => buildCardCredentials(rawCode, {
+  const entries = Array.from({ length: printCount }, () => buildCardCredentials({
     prefix: String(cardPrefix || '').trim(),
     suffix: String(cardSuffix || '').trim(),
     format: cardFormat,
-    passwordSettings: { digits: settings.digits, chars: settings.chars },
+    digits: settings.digits,
+    chars: settings.chars,
   }))
 
   const routerSource = normalizeRouterSource(category.router_source)
@@ -93,7 +90,7 @@ export async function createBatch({
 
   const chunkSize = 100
   try {
-    for (let i = 0; i < codes.length; i += chunkSize) {
+    for (let i = 0; i < entries.length; i += chunkSize) {
       const chunk = entries.slice(i, i + chunkSize)
       const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
       const params = chunk.flatMap((entry) => [batchId, entry.username, status])

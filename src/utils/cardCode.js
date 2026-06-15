@@ -28,13 +28,29 @@ export const CARD_FORMAT = {
   DIFFERENT: 'different',
 }
 
-export function buildCardCredentials(rawCode, {
+export function buildCardCredentials({
   prefix = '',
   suffix = '',
   format = CARD_FORMAT.EMPTY_PASSWORD,
-  passwordSettings = {},
+  digits = 8,
+  chars = 0,
 } = {}) {
-  const username = `${prefix}${rawCode}${suffix}`
+  const cardPrefix = String(prefix)
+  const cardSuffix = String(suffix)
+  const fixedLength = cardPrefix.length + cardSuffix.length
+  const configuredDigits = Math.max(1, Math.min(Number(digits) || 8, 20))
+  const configuredChars = Math.max(0, Math.min(Number(chars) || 0, 10))
+
+  if (fixedLength >= configuredDigits && configuredChars === 0) {
+    throw new Error('البادئة والنهاية يجب أن يكون طولهما أقل من عدد الأرقام المحدد في إعدادات الكود')
+  }
+
+  const coreDigits = Math.max(0, configuredDigits - fixedLength)
+  const rawCode = coreDigits > 0 || configuredChars > 0
+    ? generateCardCode({ digits: Math.max(1, coreDigits), chars: configuredChars })
+    : ''
+
+  const username = `${cardPrefix}${rawCode}${cardSuffix}`
 
   if (format === CARD_FORMAT.EMPTY_PASSWORD) {
     return { username, password: '' }
@@ -43,7 +59,7 @@ export function buildCardCredentials(rawCode, {
   if (format === CARD_FORMAT.DIFFERENT) {
     return {
       username,
-      password: generateCardCode(passwordSettings),
+      password: generateCardCode({ digits: configuredDigits, chars: configuredChars }),
     }
   }
 
