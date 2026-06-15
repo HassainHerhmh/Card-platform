@@ -1,6 +1,9 @@
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
 import { recordCardSale } from './ledger.service.js'
+import { ROUTER_SOURCE, normalizeRouterSource } from '../constants/routerSource.js'
+
+const AGENT_APP_ROUTER_SOURCE = ROUTER_SOURCE.USER_MANAGER
 
 const GATEWAY_ONLINE_SECONDS = 90
 const SMS_SERVICE_UNAVAILABLE =
@@ -35,9 +38,10 @@ export async function reserveCardForAgent(agentId, categoryId) {
      INNER JOIN batches b ON b.id = ca.batch_id
      INNER JOIN categories c ON c.id = b.category_id
      WHERE b.agent_id = $1 AND c.id = $2 AND ca.status = 'معلق'
+       AND b.router_source = $3 AND c.router_source = $3
      ORDER BY ca.id ASC
      LIMIT 1`,
-    [agentId, categoryId]
+    [agentId, categoryId, AGENT_APP_ROUTER_SOURCE]
   )
   return rows[0] || null
 }
@@ -90,6 +94,15 @@ export async function processAgentCharge({
   const card = await reserveCardForAgent(agentId, categoryId)
   if (!card) {
     throw new Error('لا توجد كروت متاحة لهذه الفئة')
+  }
+
+  const { rows: categoryRows } = await query(
+    'SELECT router_source AS routerSource FROM categories WHERE id = $1',
+    [categoryId]
+  )
+  const categoryRow = categoryRows[0]
+  if (normalizeRouterSource(categoryRow?.routerSource ?? categoryRow?.router_source) !== AGENT_APP_ROUTER_SOURCE) {
+    throw new Error('هذه الفئة ليست من User Manager')
   }
 
   const { rows: agentRows } = await query(

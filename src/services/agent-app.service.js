@@ -1,6 +1,9 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
 import { syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
+import { ROUTER_SOURCE } from '../constants/routerSource.js'
+
+const AGENT_APP_ROUTER_SOURCE = ROUTER_SOURCE.USER_MANAGER
 
 export async function getNetworks() {
   const { rows } = await query(
@@ -39,11 +42,14 @@ export async function getCategoriesForAgent(agentId) {
     `SELECT c.id, c.name, c.price, c.duration, c.data_quota AS dataQuota,
             COUNT(CASE WHEN ca.status = 'معلق' THEN 1 END) AS availableCards
      FROM categories c
-     LEFT JOIN batches b ON b.category_id = c.id AND b.agent_id = $1
+     LEFT JOIN batches b ON b.category_id = c.id
+       AND b.agent_id = $1
+       AND b.router_source = $2
      LEFT JOIN cards ca ON ca.batch_id = b.id
+     WHERE c.router_source = $2
      GROUP BY c.id, c.name, c.price, c.duration, c.data_quota
      ORDER BY c.id`,
-    [agentId]
+    [agentId, AGENT_APP_ROUTER_SOURCE]
   )
   return rows.map((row) => ({
     id: row.id,
