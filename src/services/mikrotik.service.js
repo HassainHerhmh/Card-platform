@@ -107,9 +107,9 @@ function mapConnectionError(error) {
 }
 
 /** عدّ سريع بدون جلب كل السجلات — للمراقبة فقط */
-async function printCount(api, path) {
+async function printCount(api, path, queryArgs = []) {
   try {
-    const rows = await api.write(path, ['=count-only='])
+    const rows = await api.write(path, [...queryArgs, '=count-only='])
     if (!rows?.length) return 0
     const row = rows[0]
     if (row.ret !== undefined && row.ret !== null && row.ret !== '') {
@@ -121,11 +121,33 @@ async function printCount(api, path) {
   }
 }
 
+async function countActiveUserManagerSessions(api) {
+  try {
+    const rows = await api.write('/tool/user-manager/session/print', ['?active=yes', '=count-only='])
+    if (rows?.[0]?.ret !== undefined && rows[0].ret !== null && rows[0].ret !== '') {
+      return Number(rows[0].ret) || 0
+    }
+  } catch {
+    // fallback below
+  }
+
+  try {
+    const rows = await api.write('/tool/user-manager/session/print', ['=.proplist=active'])
+    return (rows || []).filter((row) => {
+      const active = row.active
+      return active === true || active === 'true' || active === 'yes'
+    }).length
+  } catch {
+    return 0
+  }
+}
+
 async function fetchUserManagerStatusLite(api) {
   try {
-    const [userManagerUsers, activeUserManagerSessions, umProfiles, customersRaw] = await Promise.all([
+    const [userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, umProfiles, customersRaw] = await Promise.all([
       printCount(api, '/tool/user-manager/user/print'),
       printCount(api, '/tool/user-manager/session/print'),
+      countActiveUserManagerSessions(api),
       printCount(api, '/tool/user-manager/profile/print'),
       api.write('/tool/user-manager/customer/print').catch(() => []),
     ])
@@ -135,6 +157,7 @@ async function fetchUserManagerStatusLite(api) {
 
     return {
       userManagerUsers,
+      userManagerSessionsTotal,
       activeUserManagerSessions,
       userManager: {
         available: userManagerUsers > 0 || customers.length > 0 || umProfiles > 0,
@@ -149,6 +172,7 @@ async function fetchUserManagerStatusLite(api) {
   } catch {
     return {
       userManagerUsers: 0,
+      userManagerSessionsTotal: 0,
       activeUserManagerSessions: 0,
       userManager: {
         available: false,
@@ -185,16 +209,18 @@ export async function getRouterStatus() {
       const identityRows = await api.write('/system/identity/print')
       const resourceRows = await api.write('/system/resource/print')
 
-      const [hotspotUsers, activeHotspotUsers, umLite] = await Promise.all([
+      const [hotspotUsers, activeHotspotUsers, umLite, neighborCount] = await Promise.all([
         printCount(api, '/ip/hotspot/user/print'),
         printCount(api, '/ip/hotspot/active/print'),
         fetchUserManagerStatusLite(api),
+        printCount(api, '/ip/neighbor/print').catch(() => 0),
       ])
 
-      const { userManagerUsers, activeUserManagerSessions, userManager } = umLite
+      const { userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, userManager } = umLite
 
       const identity = identityRows?.[0] || {}
       const resource = resourceRows?.[0] || {}
+      const connectedUsers = activeHotspotUsers + activeUserManagerSessions
 
       return {
         connected: true,
@@ -208,7 +234,11 @@ export async function getRouterStatus() {
         hotspotUsers,
         activeHotspotUsers,
         userManagerUsers,
+        userManagerSessionsTotal,
         activeUserManagerSessions,
+        connectedUsers,
+        activeUsers: connectedUsers,
+        neighborCount,
         userManager,
         totalCards: hotspotUsers + userManagerUsers,
         cpuLoad: resource['cpu-load'] ?? null,
