@@ -1,10 +1,11 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
 import { formatCurrency } from '../constants/currency.js'
+import { postCardBatchDeliveryJournal } from './accounting.service.js'
 
 async function getAgentRow(agentId) {
   const { rows } = await query(
-    'SELECT id, name, balance, cards_sold AS cardsSold FROM agents WHERE id = $1',
+    'SELECT id, name, balance, cards_sold AS cardsSold, account_id AS accountId FROM agents WHERE id = $1',
     [agentId]
   )
   if (!rows[0]) throw new Error('الوكيل غير موجود')
@@ -87,12 +88,25 @@ export async function appendLedgerEntry({
 
 export async function recordBatchDelivery({ agentId, batchId, categoryName, count, unitPrice }) {
   const total = Number(count) * Number(unitPrice)
+  const agent = await getAgentRow(agentId)
+  const description = `تسليم ${count} كرت — ${categoryName} — ${formatCurrency(total)}`
+
+  if (agent.accountId) {
+    await postCardBatchDeliveryJournal({
+      batchId,
+      agentAccountId: agent.accountId,
+      total,
+      description,
+    })
+    return { journal: true, balance: null }
+  }
+
   return appendLedgerEntry({
     agentId,
     type: 'تسليم كروت',
     cards: count,
     debit: total,
-    description: `تسليم ${count} كرت — ${categoryName} — ${formatCurrency(total)}`,
+    description,
     referenceId: batchId,
   })
 }

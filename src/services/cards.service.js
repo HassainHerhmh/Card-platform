@@ -101,20 +101,24 @@ export async function createBatch({
     }
 
     await pushRouterUsers({ source: routerSource, profile: profileName, entries })
+
+    if (agentDbId) {
+      await recordBatchDelivery({
+        agentId: agentDbId,
+        batchId,
+        categoryName: category.name,
+        count: printCount,
+        unitPrice: category.price,
+      })
+    }
   } catch (error) {
+    await query(
+      'DELETE FROM journal_entries WHERE reference_type = $1 AND reference_id = $2',
+      ['card_batch', batchId]
+    )
     await query('DELETE FROM cards WHERE batch_id = $1', [batchId])
     await query('DELETE FROM batches WHERE id = $1', [batchId])
     throw error
-  }
-
-  if (agentDbId) {
-    await recordBatchDelivery({
-      agentId: agentDbId,
-      batchId,
-      categoryName: category.name,
-      count: printCount,
-      unitPrice: category.price,
-    })
   }
 
   const { rows: batchRows } = await query('SELECT * FROM batches WHERE id = $1', [batchId])

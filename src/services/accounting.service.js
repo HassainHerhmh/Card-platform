@@ -169,6 +169,7 @@ export async function ensureAccountingTables() {
     `CREATE TABLE IF NOT EXISTS transit_account_settings (
       id TINYINT PRIMARY KEY DEFAULT 1,
       commission_income_account INT NULL,
+      card_income_account INT NULL,
       courier_commission_account INT NULL,
       transfer_guarantee_account INT NULL,
       currency_exchange_account INT NULL,
@@ -190,6 +191,12 @@ export async function ensureAccountingTables() {
 
   try {
     await query('ALTER TABLE agents ADD COLUMN account_id INT NULL')
+  } catch (error) {
+    if (error.code !== 'ER_DUP_FIELDNAME') throw error
+  }
+
+  try {
+    await query('ALTER TABLE transit_account_settings ADD COLUMN card_income_account INT NULL')
   } catch (error) {
     if (error.code !== 'ER_DUP_FIELDNAME') throw error
   }
@@ -1017,17 +1024,59 @@ export async function deleteAccountCeiling(id) {
 
 export async function getTransitAccounts() {
   const { rows } = await query('SELECT * FROM transit_account_settings WHERE id = 1')
-  return rows[0] || {}
+  const row = rows[0] || {}
+  if (!row.card_income_account && row.commission_income_account) {
+    row.card_income_account = row.commission_income_account
+  }
+  return row
+}
+
+export async function postCardBatchDeliveryJournal({
+  batchId,
+  agentAccountId,
+  total,
+  description,
+  journalDate,
+}) {
+  const settings = await getTransitAccounts()
+  const transitAccountId = settings.card_income_account || settings.commission_income_account
+  if (!transitAccountId) {
+    throw new Error('حدّد حساب وسيط إيرادات الكروت من إعدادات الحسابات الوسيطة')
+  }
+  if (!agentAccountId) {
+    throw new Error('الوكيل غير مرتبط بحساب فرعي في المحاسبة')
+  }
+
+  const amount = Number(total)
+  if (!amount || amount <= 0) throw new Error('قيمة الدفعة غير صالحة')
+
+  const { rows: currencyRows } = await query(
+    'SELECT id FROM currencies WHERE is_local = 1 LIMIT 1'
+  )
+  const currencyId = currencyRows[0]?.id || 1
+
+  const base = {
+    journal_type_id: 1,
+    reference_type: 'card_batch',
+    reference_id: batchId,
+    journal_date: journalDate || new Date().toISOString().slice(0, 10),
+    currency_id: currencyId,
+    notes: String(description || '').slice(0, 500),
+  }
+
+  await insertJournalLine({ ...base, account_id: transitAccountId, debit: amount, credit: 0 })
+  await insertJournalLine({ ...base, account_id: agentAccountId, debit: 0, credit: amount })
 }
 
 export async function saveTransitAccounts(data) {
   await query(
     `INSERT INTO transit_account_settings
-     (id, commission_income_account, courier_commission_account, transfer_guarantee_account,
+     (id, commission_income_account, card_income_account, courier_commission_account, transfer_guarantee_account,
       currency_exchange_account, customer_guarantee_account, customer_credit_account, coupon_discount_account)
-     VALUES (1,$1,$2,$3,$4,$5,$6,$7)
+     VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8)
      ON DUPLICATE KEY UPDATE
       commission_income_account=VALUES(commission_income_account),
+      card_income_account=VALUES(card_income_account),
       courier_commission_account=VALUES(courier_commission_account),
       transfer_guarantee_account=VALUES(transfer_guarantee_account),
       currency_exchange_account=VALUES(currency_exchange_account),
@@ -1036,6 +1085,7 @@ export async function saveTransitAccounts(data) {
       coupon_discount_account=VALUES(coupon_discount_account)`,
     [
       data.commission_income_account || null,
+      data.card_income_account || null,
       data.courier_commission_account || null,
       data.transfer_guarantee_account || null,
       data.currency_exchange_account || null,
