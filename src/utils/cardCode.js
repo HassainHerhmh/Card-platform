@@ -21,3 +21,31 @@ export function generateCardCode({ digits = 8, chars = 0 } = {}) {
 
   return code
 }
+
+export const CARD_FORMAT = {
+  EMPTY_PASSWORD: 'empty_password',
+  SAME: 'same',
+  DIFFERENT: 'different',
+}
+
+export function buildCardCredentials(rawCode, {
+  prefix = '',
+  suffix = '',
+  format = CARD_FORMAT.EMPTY_PASSWORD,
+  passwordSettings = {},
+} = {}) {
+  const username = `${prefix}${rawCode}${suffix}`
+
+  if (format === CARD_FORMAT.EMPTY_PASSWORD) {
+    return { username, password: '' }
+  }
+
+  if (format === CARD_FORMAT.DIFFERENT) {
+    return {
+      username,
+      password: generateCardCode(passwordSettings),
+    }
+  }
+
+  return { username, password: username }
+}

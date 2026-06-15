@@ -1,7 +1,7 @@
 import { query } from '../db/pool.js'
 import { recordBatchDelivery } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
-import { generateCardCode } from '../utils/cardCode.js'
+import { generateCardCode, buildCardCredentials, CARD_FORMAT } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
 import { pushRouterUsers } from './mikrotik.service.js'
 import {
@@ -35,7 +35,14 @@ export async function getBatches() {
   return batches
 }
 
-export async function createBatch({ categoryId, count, agentId }) {
+export async function createBatch({
+  categoryId,
+  count,
+  agentId,
+  cardPrefix = '',
+  cardSuffix = '',
+  cardFormat = CARD_FORMAT.EMPTY_PASSWORD,
+}) {
   const printCount = Number(count)
   if (!printCount || printCount < 1) throw new Error('عدد الكروت مطلوب')
   if (printCount > 500) throw new Error('الحد الأقصى 500 كرت في المرة الواحدة')
@@ -69,6 +76,13 @@ export async function createBatch({ categoryId, count, agentId }) {
     generateCardCode({ digits: settings.digits, chars: settings.chars })
   )
 
+  const entries = codes.map((rawCode) => buildCardCredentials(rawCode, {
+    prefix: String(cardPrefix || '').trim(),
+    suffix: String(cardSuffix || '').trim(),
+    format: cardFormat,
+    passwordSettings: { digits: settings.digits, chars: settings.chars },
+  }))
+
   const routerSource = normalizeRouterSource(category.router_source)
 
   const { insertId: batchId } = await query(
@@ -80,16 +94,16 @@ export async function createBatch({ categoryId, count, agentId }) {
   const chunkSize = 100
   try {
     for (let i = 0; i < codes.length; i += chunkSize) {
-      const chunk = codes.slice(i, i + chunkSize)
+      const chunk = entries.slice(i, i + chunkSize)
       const placeholders = chunk.map(() => '(?, ?, ?)').join(', ')
-      const params = chunk.flatMap((code) => [batchId, code, status])
+      const params = chunk.flatMap((entry) => [batchId, entry.username, status])
       await query(
         `INSERT INTO cards (batch_id, code, status) VALUES ${placeholders}`,
         params
       )
     }
 
-    await pushRouterUsers({ source: routerSource, profile: profileName, codes })
+    await pushRouterUsers({ source: routerSource, profile: profileName, entries })
   } catch (error) {
     await query('DELETE FROM cards WHERE batch_id = $1', [batchId])
     await query('DELETE FROM batches WHERE id = $1', [batchId])

@@ -2219,27 +2219,32 @@ export async function syncCategoriesFromRouter() {
   }
 }
 
-export async function pushUserManagerUsers({ profile, codes, customer }) {
+export async function pushUserManagerUsers({ profile, codes, entries, customer }) {
   const profileName = profile
-  if (!profileName || !codes?.length) {
+  const cardEntries = entries?.length
+    ? entries
+    : (codes || []).map((code) => ({ username: code, password: code }))
+
+  if (!profileName || !cardEntries.length) {
     throw new Error('بروفايل User Manager والأكواد مطلوبان')
   }
 
   return withConnection(async (api) => {
     const cust = await resolveUserManagerCustomer(api, customer)
 
-    for (const code of codes) {
+    for (const { username, password } of cardEntries) {
       let added = false
       for (let attempt = 0; attempt < 5 && !added; attempt += 1) {
         try {
-          await api.write('/tool/user-manager/user/add', [
-            `=username=${code}`,
-            `=password=${code}`,
+          const addArgs = [
+            `=username=${username}`,
+            `=password=${password}`,
             `=customer=${cust}`,
-          ])
+          ]
+          await api.write('/tool/user-manager/user/add', addArgs)
           await api.write('/tool/user-manager/user/create-and-activate-profile', [
             `=customer=${cust}`,
-            `=numbers=${code}`,
+            `=numbers=${username}`,
             `=profile=${profileName}`,
           ])
           added = true
@@ -2250,7 +2255,7 @@ export async function pushUserManagerUsers({ profile, codes, customer }) {
     }
 
     const users = await api.write('/tool/user-manager/user/print')
-    const umCount = Array.isArray(users) ? users.length : codes.length
+    const umCount = Array.isArray(users) ? users.length : 0
     let hotspotCount = 0
     try {
       const hotspotUsers = await api.write('/ip/hotspot/user/print')
@@ -2262,32 +2267,36 @@ export async function pushUserManagerUsers({ profile, codes, customer }) {
     const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
-    return { added: codes.length, totalOnRouter: liveCount, userManagerTotal: umCount, customer: cust }
+    return { added: cardEntries.length, totalOnRouter: liveCount, userManagerTotal: umCount, customer: cust }
   })
 }
 
-export async function pushRouterUsers({ source, profile, codes }) {
+export async function pushRouterUsers({ source, profile, codes, entries }) {
   const normalizedSource = normalizeRouterSource(source)
   if (normalizedSource === ROUTER_SOURCE.USER_MANAGER) {
-    return pushUserManagerUsers({ profile, codes })
+    return pushUserManagerUsers({ profile, codes, entries })
   }
-  return pushHotspotUsers({ profile, codes })
+  return pushHotspotUsers({ profile, codes, entries })
 }
 
-export async function pushHotspotUsers({ profile, codes }) {
+export async function pushHotspotUsers({ profile, codes, entries }) {
   const profileName = profile
-  if (!profileName || !codes?.length) {
+  const cardEntries = entries?.length
+    ? entries
+    : (codes || []).map((code) => ({ username: code, password: code }))
+
+  if (!profileName || !cardEntries.length) {
     throw new Error('بروفايل الراوتر والأكواد مطلوبان')
   }
 
   return withConnection(async (api) => {
-    for (const code of codes) {
+    for (const { username, password } of cardEntries) {
       let added = false
       for (let attempt = 0; attempt < 5 && !added; attempt += 1) {
         try {
           await api.write('/ip/hotspot/user/add', [
-            `=name=${code}`,
-            `=password=${code}`,
+            `=name=${username}`,
+            `=password=${password}`,
             `=profile=${profileName}`,
           ])
           added = true
@@ -2298,7 +2307,7 @@ export async function pushHotspotUsers({ profile, codes }) {
     }
 
     const hotspotUsers = await api.write('/ip/hotspot/user/print')
-    const hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : codes.length
+    const hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : cardEntries.length
     let umCount = 0
     try {
       const umUsers = await api.write('/tool/user-manager/user/print')
@@ -2310,6 +2319,6 @@ export async function pushHotspotUsers({ profile, codes }) {
     const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
-    return { added: codes.length, totalOnRouter: liveCount }
+    return { added: cardEntries.length, totalOnRouter: liveCount }
   })
 }
