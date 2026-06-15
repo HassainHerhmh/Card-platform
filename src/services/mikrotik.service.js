@@ -58,7 +58,10 @@ async function withConnection(fn) {
     return await fn(api, cfg)
   } finally {
     try {
-      api.close()
+      await Promise.race([
+        Promise.resolve().then(() => api.close()),
+        new Promise((resolve) => { setTimeout(resolve, 3000) }),
+      ])
     } catch {
       // ignore close errors
     }
@@ -85,7 +88,10 @@ async function withInventoryConnection(fn) {
     return await fn(api, cfg)
   } finally {
     try {
-      api.close()
+      await Promise.race([
+        Promise.resolve().then(() => api.close()),
+        new Promise((resolve) => { setTimeout(resolve, 3000) }),
+      ])
     } catch {
       // ignore close errors
     }
@@ -2373,16 +2379,10 @@ export async function pushUserManagerUsers({ profile, codes, entries, customer }
       }
     }
 
-    const users = await api.write('/tool/user-manager/user/print')
-    const umCount = Array.isArray(users) ? users.length : 0
-    let hotspotCount = 0
-    try {
-      const hotspotUsers = await api.write('/ip/hotspot/user/print')
-      hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : 0
-    } catch {
-      hotspotCount = 0
-    }
-
+    const [hotspotCount, umCount] = await Promise.all([
+      printCount(api, '/ip/hotspot/user/print').catch(() => 0),
+      printCount(api, '/tool/user-manager/user/print').catch(() => 0),
+    ])
     const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
@@ -2425,16 +2425,10 @@ export async function pushHotspotUsers({ profile, codes, entries }) {
       }
     }
 
-    const hotspotUsers = await api.write('/ip/hotspot/user/print')
-    const hotspotCount = Array.isArray(hotspotUsers) ? hotspotUsers.length : cardEntries.length
-    let umCount = 0
-    try {
-      const umUsers = await api.write('/tool/user-manager/user/print')
-      umCount = Array.isArray(umUsers) ? umUsers.length : 0
-    } catch {
-      umCount = 0
-    }
-
+    const [hotspotCount, umCount] = await Promise.all([
+      printCount(api, '/ip/hotspot/user/print').catch(() => 0),
+      printCount(api, '/tool/user-manager/user/print').catch(() => 0),
+    ])
     const liveCount = hotspotCount + umCount
     await query('UPDATE mikrotik_routers SET cards_printed = $1', [liveCount])
 
