@@ -2159,18 +2159,10 @@ async function upsertCategoryFromProfile({
   const durLabel = duration || formatDurationLabel(durHours, durMinutes)
   const categoryPrice = Number(price) || 0
 
-  let { rows } = await query(
+  const { rows } = await query(
     'SELECT id FROM categories WHERE router_profile = $1 AND router_source = $2 LIMIT 1',
     [name, normalizedSource]
   )
-
-  if (!rows[0] && normalizedSource === ROUTER_SOURCE.USER_MANAGER) {
-    const fallback = await query(
-      'SELECT id FROM categories WHERE router_profile = $1 LIMIT 1',
-      [name]
-    )
-    rows = fallback.rows
-  }
 
   if (rows[0]) {
     await query(
@@ -2192,16 +2184,35 @@ async function upsertCategoryFromProfile({
   return { action: 'created', name, source: normalizedSource }
 }
 
-async function fixMislabeledUserManagerCategories(umProfileNames) {
-  if (!umProfileNames.length) return 0
+async function reconcileRouterSourceLabels(umProfileNames, hotspotProfileNames) {
+  const umSet = new Set(umProfileNames)
+  const hsSet = new Set(hotspotProfileNames)
+  let fixed = 0
 
-  const placeholders = umProfileNames.map((_, i) => `$${i + 1}`).join(', ')
-  const { affectedRows } = await query(
-    `UPDATE categories SET router_source = 'user-manager'
-     WHERE router_source = 'hotspot' AND router_profile IN (${placeholders})`,
-    umProfileNames
+  const { rows } = await query(
+    `SELECT id, router_profile AS routerProfile FROM categories
+     WHERE router_source = 'user-manager' AND router_profile IS NOT NULL`
   )
-  return affectedRows || 0
+
+  for (const row of rows) {
+    if (umSet.has(row.routerProfile)) continue
+
+    const revertToHotspot = hsSet.has(row.routerProfile)
+    if (!revertToHotspot) continue
+
+    const { affectedRows } = await query(
+      `UPDATE categories SET router_source = 'hotspot'
+       WHERE id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM batches b
+           WHERE b.category_id = $1 AND b.router_source = 'user-manager'
+         )`,
+      [row.id]
+    )
+    fixed += affectedRows || 0
+  }
+
+  return fixed
 }
 
 async function deleteDuplicateHotspotCategories(umProfileNames) {
@@ -2260,7 +2271,7 @@ export async function syncAllFromRouter() {
   const umProfileNames = umProfiles.map((p) => p.name)
   const umNameSet = new Set(umProfileNames)
   const relabeled = userManagerAvailable
-    ? await fixMislabeledUserManagerCategories(umProfileNames)
+    ? await reconcileRouterSourceLabels(umProfileNames, profiles.map((p) => p.name))
     : 0
   const deletedDupHotspot = userManagerAvailable
     ? await deleteDuplicateHotspotCategories(umProfileNames)

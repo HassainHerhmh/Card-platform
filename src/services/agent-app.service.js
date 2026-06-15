@@ -1,6 +1,6 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
-import { syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
+import { fetchUserManagerProfilesOnly, syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
 import { ROUTER_SOURCE } from '../constants/routerSource.js'
 
 const AGENT_APP_ROUTER_SOURCE = ROUTER_SOURCE.USER_MANAGER
@@ -38,8 +38,17 @@ export async function getCategoriesForAgent(agentId) {
     console.warn('[agent-app] router card sync skipped:', error.message)
   }
 
+  let umProfileNames = null
+  try {
+    const um = await fetchUserManagerProfilesOnly()
+    umProfileNames = new Set((um.profiles || []).map((p) => p.name).filter(Boolean))
+  } catch (error) {
+    console.warn('[agent-app] UM profile fetch skipped:', error.message)
+  }
+
   const { rows } = await query(
     `SELECT c.id, c.name, c.price, c.duration, c.data_quota AS dataQuota,
+            c.router_profile AS routerProfile,
             COUNT(CASE WHEN ca.status = 'معلق' THEN 1 END) AS availableCards
      FROM categories c
      LEFT JOIN batches b ON b.category_id = c.id
@@ -47,11 +56,17 @@ export async function getCategoriesForAgent(agentId) {
        AND b.router_source = $2
      LEFT JOIN cards ca ON ca.batch_id = b.id
      WHERE c.router_source = $2
-     GROUP BY c.id, c.name, c.price, c.duration, c.data_quota
+       AND c.router_profile IS NOT NULL
+     GROUP BY c.id, c.name, c.price, c.duration, c.data_quota, c.router_profile
      ORDER BY c.id`,
     [agentId, AGENT_APP_ROUTER_SOURCE]
   )
-  return rows.map((row) => ({
+
+  const filtered = umProfileNames
+    ? rows.filter((row) => umProfileNames.has(row.routerProfile))
+    : rows
+
+  return filtered.map((row) => ({
     id: row.id,
     name: row.name,
     price: Number(row.price),
