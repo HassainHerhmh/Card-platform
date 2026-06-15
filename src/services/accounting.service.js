@@ -934,8 +934,8 @@ export async function listJournalEntriesGrouped() {
             MAX(je.notes) AS notes,
             MAX(c.name_ar) AS currency_name,
             SUM(CASE WHEN je.debit > 0 THEN je.debit ELSE 0 END) AS amount,
-            MAX(CASE WHEN je.debit > 0 THEN aa.name_ar END) AS from_account,
-            MAX(CASE WHEN je.credit > 0 THEN aa.name_ar END) AS to_account
+            MAX(CASE WHEN je.credit > 0 THEN aa.name_ar END) AS from_account,
+            MAX(CASE WHEN je.debit > 0 THEN aa.name_ar END) AS to_account
      FROM journal_entries je
      LEFT JOIN accounting_accounts aa ON aa.id = je.account_id
      LEFT JOIN currencies c ON c.id = je.currency_id
@@ -1054,18 +1054,39 @@ export async function postCardBatchDeliveryJournal({
     'SELECT id FROM currencies WHERE is_local = 1 LIMIT 1'
   )
   const currencyId = currencyRows[0]?.id || 1
+  const journalDay = journalDate || await getLocalJournalDate()
 
   const base = {
     journal_type_id: 1,
     reference_type: 'card_batch',
     reference_id: batchId,
-    journal_date: journalDate || new Date().toISOString().slice(0, 10),
+    journal_date: journalDay,
     currency_id: currencyId,
     notes: String(description || '').slice(0, 500),
   }
 
   await insertJournalLine({ ...base, account_id: transitAccountId, debit: amount, credit: 0 })
   await insertJournalLine({ ...base, account_id: agentAccountId, debit: 0, credit: amount })
+}
+
+export async function hasBatchDeliveryJournal(batchId) {
+  const { rows } = await query(
+    `SELECT id FROM journal_entries
+     WHERE reference_type = 'card_batch' AND reference_id = $1
+     LIMIT 1`,
+    [batchId]
+  )
+  return Boolean(rows[0])
+}
+
+export async function getLocalJournalDate() {
+  const { rows } = await query('SELECT CURDATE() AS journalDate')
+  const value = rows[0]?.journalDate
+  if (!value) return new Date().toISOString().slice(0, 10)
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10)
+  }
+  return String(value).slice(0, 10)
 }
 
 export async function saveTransitAccounts(data) {

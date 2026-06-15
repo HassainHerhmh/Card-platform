@@ -1,7 +1,12 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
 import { formatCurrency } from '../constants/currency.js'
-import { postCardBatchDeliveryJournal } from './accounting.service.js'
+import {
+  postCardBatchDeliveryJournal,
+  hasBatchDeliveryJournal,
+  getTransitAccounts,
+  getLocalJournalDate,
+} from './accounting.service.js'
 
 async function getAgentRow(agentId) {
   const { rows } = await query(
@@ -9,7 +14,11 @@ async function getAgentRow(agentId) {
     [agentId]
   )
   if (!rows[0]) throw new Error('الوكيل غير موجود')
-  return rows[0]
+  const row = rows[0]
+  return {
+    ...row,
+    accountId: row.accountId ?? row.account_id ?? null,
+  }
 }
 
 function inferDebitCredit(row) {
@@ -89,15 +98,19 @@ export async function appendLedgerEntry({
 export async function recordBatchDelivery({ agentId, batchId, categoryName, count, unitPrice }) {
   const total = Number(count) * Number(unitPrice)
   const agent = await getAgentRow(agentId)
-  const description = `تسليم ${count} كرت — ${categoryName} — ${formatCurrency(total)}`
+  const description = `تسليم دفعة ${count} كرت — فئة ${categoryName} — ${formatCurrency(total)}`
 
   if (agent.accountId) {
-    await postCardBatchDeliveryJournal({
-      batchId,
-      agentAccountId: agent.accountId,
-      total,
-      description,
-    })
+    const exists = await hasBatchDeliveryJournal(batchId)
+    if (!exists) {
+      await postCardBatchDeliveryJournal({
+        batchId,
+        agentAccountId: agent.accountId,
+        total,
+        description,
+        journalDate: await getLocalJournalDate(),
+      })
+    }
     return { journal: true, balance: null }
   }
 
@@ -109,6 +122,66 @@ export async function recordBatchDelivery({ agentId, batchId, categoryName, coun
     description,
     referenceId: batchId,
   })
+}
+
+export async function syncMissingBatchJournals({ limit = 100 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 500)
+  const { rows } = await query(
+    `SELECT b.id AS batchId, b.category_name AS categoryName, b.count, b.printed_at AS printedAt,
+            a.account_id AS accountId, COALESCE(c.price, 0) AS price
+     FROM batches b
+     INNER JOIN agents a ON a.id = b.agent_id
+     LEFT JOIN categories c ON c.id = b.category_id
+     WHERE b.agent_id IS NOT NULL
+     ORDER BY b.id DESC
+     LIMIT ${safeLimit}`
+  )
+
+  const settings = await getTransitAccounts()
+  if (!settings.card_income_account && !settings.commission_income_account) {
+    throw new Error('حدّد حساب وسيط إيرادات الكروت من إعدادات الحسابات الوسيطة')
+  }
+
+  const results = []
+  for (const row of rows) {
+    const batchId = row.batchId ?? row.id
+    if (await hasBatchDeliveryJournal(batchId)) {
+      results.push({ batchId, status: 'exists' })
+      continue
+    }
+
+    const accountId = row.accountId ?? row.account_id
+    if (!accountId) {
+      results.push({ batchId, status: 'skipped', reason: 'الوكيل بلا حساب محاسبي' })
+      continue
+    }
+
+    const total = Number(row.count) * Number(row.price || 0)
+    if (total <= 0) {
+      results.push({ batchId, status: 'skipped', reason: 'قيمة الدفعة صفر' })
+      continue
+    }
+
+    const printedAt = row.printedAt
+    const journalDate = printedAt instanceof Date
+      ? printedAt.toISOString().slice(0, 10)
+      : String(printedAt || '').slice(0, 10) || await getLocalJournalDate()
+
+    try {
+      await postCardBatchDeliveryJournal({
+        batchId,
+        agentAccountId: accountId,
+        total,
+        description: `تسليم دفعة ${row.count} كرت — فئة ${row.categoryName} — ${formatCurrency(total)}`,
+        journalDate,
+      })
+      results.push({ batchId, status: 'created' })
+    } catch (error) {
+      results.push({ batchId, status: 'error', reason: error.message })
+    }
+  }
+
+  return results
 }
 
 export async function recordCardSale({ agentId, agentName, price, categoryName, cardCode, networkName }) {

@@ -1,9 +1,10 @@
 import { query } from '../db/pool.js'
-import { recordBatchDelivery } from './ledger.service.js'
+import { recordBatchDelivery, syncMissingBatchJournals } from './ledger.service.js'
 import { formatDate } from '../utils/format.js'
 import { buildCardCredentials, CARD_FORMAT } from '../utils/cardCode.js'
 import { getCardSettings } from './settings.service.js'
 import { pushRouterUsers } from './mikrotik.service.js'
+import { getTransitAccounts } from './accounting.service.js'
 import {
   routerSourceLabelAr,
   normalizeRouterSource,
@@ -18,6 +19,12 @@ async function getBatchCards(batchId) {
 }
 
 export async function getBatches() {
+  try {
+    await syncMissingBatchJournals({ limit: 100 })
+  } catch (error) {
+    console.warn('[cards] sync batch journals skipped:', error.message)
+  }
+
   const { rows } = await query('SELECT * FROM batches ORDER BY id DESC')
   const batches = []
   for (const row of rows) {
@@ -66,6 +73,13 @@ export async function createBatch({
     if (agentRows[0]) {
       agentName = agentRows[0].name
       agentDbId = agentRows[0].id
+      if (!agentRows[0].account_id) {
+        throw new Error('الوكيل غير مرتبط بحساب محاسبي — اربطه من إدارة الوكلاء أولاً')
+      }
+      const transit = await getTransitAccounts()
+      if (!transit.card_income_account && !transit.commission_income_account) {
+        throw new Error('حدّد حساب وسيط إيرادات الكروت من المحاسبة → الحسابات الوسيطة')
+      }
     }
   }
 
@@ -100,8 +114,6 @@ export async function createBatch({
       )
     }
 
-    await pushRouterUsers({ source: routerSource, profile: profileName, entries })
-
     if (agentDbId) {
       await recordBatchDelivery({
         agentId: agentDbId,
@@ -111,6 +123,8 @@ export async function createBatch({
         unitPrice: category.price,
       })
     }
+
+    await pushRouterUsers({ source: routerSource, profile: profileName, entries })
   } catch (error) {
     await query(
       'DELETE FROM journal_entries WHERE reference_type = $1 AND reference_id = $2',

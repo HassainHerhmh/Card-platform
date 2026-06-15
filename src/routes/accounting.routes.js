@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requireAuth } from '../middleware/auth.js'
 import * as accounting from '../services/accounting.service.js'
+import { syncMissingBatchJournals } from '../services/ledger.service.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -288,6 +289,11 @@ router.delete('/payment-vouchers/:id', async (req, res) => {
 
 router.get('/journal-entries', async (_req, res) => {
   try {
+    try {
+      await syncMissingBatchJournals({ limit: 100 })
+    } catch (syncError) {
+      console.warn('[accounting] batch journal sync skipped:', syncError.message)
+    }
     ok(res, { list: await accounting.listJournalEntriesGrouped() })
   } catch (e) { fail(res, e, 500) }
 })
@@ -377,6 +383,11 @@ router.post('/currency-exchange', async (req, res) => {
 
 router.post('/reports/account-statement', async (req, res) => {
   try {
+    try {
+      await syncMissingBatchJournals({ limit: 100 })
+    } catch (syncError) {
+      console.warn('[accounting] batch journal sync skipped:', syncError.message)
+    }
     const list = await accounting.getAccountStatement(req.body)
     ok(res, { list })
   } catch (e) { fail(res, e, 500) }
