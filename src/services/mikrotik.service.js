@@ -340,13 +340,15 @@ export async function getHotspotUsers() {
 }
 
 function mapHotspotUserRow(u) {
+  const assignedProfile = u.profile || ''
   return {
     id: u['.id'],
     serialNumber: extractRouterSerial(u),
     name: u.name || '',
     password: u.password || '',
-    profile: u.profile || '',
-    packageLabel: u.profile || '',
+    assignedProfile,
+    profile: assignedProfile,
+    packageLabel: assignedProfile,
     comment: u.comment || '',
     location: u.comment || '',
     pointOfSale: u.comment || '',
@@ -361,22 +363,49 @@ function mapHotspotUserRow(u) {
   }
 }
 
-function hasCardUsage(user) {
-  const uptime = user.uptime || ''
-  const bytesIn = Number(user.bytesIn || 0)
-  const bytesOut = Number(user.bytesOut || 0)
-  return Boolean(uptime && uptime !== '0s') || bytesIn > 0 || bytesOut > 0
+function parseByteLimit(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : 0
 }
 
-function resolveCardStatus(user, activeUsernames, usageCheck = hasCardUsage) {
+function hasCardUsage(user) {
+  const usedSec = parseUsageSeconds(user.uptime)
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  return usedSec > 0 || bytesIn > 0 || bytesOut > 0
+}
+
+/** حالات مخزون MikroTik: انتظار | نشط | انتهى الرصيد | معطل | خطاء في البروفايل */
+function resolveCardStatus(user, validProfiles = null) {
   if (user.disabled) {
-    return { status: 'disabled', label: 'معطّل' }
+    return { status: 'disabled', label: 'معطل' }
   }
-  if (isUserCurrentlyOnline(user, activeUsernames)) {
-    return { status: 'connected', label: 'متصل الآن' }
+
+  const assignedProfile = user.assignedProfile || user.profile || ''
+  if (!assignedProfile) {
+    return { status: 'profile_error', label: 'خطاء في البروفايل' }
   }
-  if (usageCheck(user)) {
-    return { status: 'expired', label: 'منتهي' }
+  if (validProfiles?.size && !validProfiles.has(assignedProfile)) {
+    return { status: 'profile_error', label: 'خطاء في البروفايل' }
+  }
+
+  const usedSec = parseUsageSeconds(user.uptime)
+  const limitUptimeSec = parseUsageSeconds(user.limitUptime)
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  const limitBytesIn = parseByteLimit(user.limitBytesIn)
+  const limitBytesOut = parseByteLimit(user.limitBytesOut)
+
+  const uptimeExhausted = limitUptimeSec > 0 && usedSec >= limitUptimeSec
+  const bytesExhausted =
+    (limitBytesIn > 0 && bytesIn >= limitBytesIn) ||
+    (limitBytesOut > 0 && bytesOut >= limitBytesOut)
+
+  if (uptimeExhausted || bytesExhausted) {
+    return { status: 'expired', label: 'انتهى الرصيد' }
+  }
+  if (hasCardUsage(user)) {
+    return { status: 'active', label: 'نشط' }
   }
   return { status: 'available', label: 'انتظار' }
 }
@@ -388,13 +417,12 @@ export async function getHotspotInventory() {
       api.write('/ip/hotspot/active/print').catch(() => []),
     ])
 
-    const activeUsernames = new Set(
-      (activeSessions || []).map((s) => s.user).filter(Boolean)
-    )
+    const profilesRaw = await api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
+    const validProfiles = new Set((profilesRaw || []).map((p) => p.name).filter(Boolean))
 
     const cards = (users || []).map((u) => {
       const row = mapHotspotUserRow(u)
-      const { status, label } = resolveCardStatus(row, activeUsernames)
+      const { status, label } = resolveCardStatus(row, validProfiles)
       const activeSession = (activeSessions || []).find((s) => s.user === row.name)
       return {
         ...row,
@@ -413,9 +441,10 @@ export async function getHotspotInventory() {
     const summary = {
       total: cards.length,
       available: cards.filter((c) => c.status === 'available').length,
-      connected: cards.filter((c) => c.status === 'connected').length,
+      active: cards.filter((c) => c.status === 'active').length,
       expired: cards.filter((c) => c.status === 'expired').length,
       disabled: cards.filter((c) => c.status === 'disabled').length,
+      profile_error: cards.filter((c) => c.status === 'profile_error').length,
     }
 
     return {
@@ -834,13 +863,18 @@ export async function getUserManagerUsers() {
 }
 
 function mapUserManagerUserRow(u) {
+  const assignedProfile = u.profile || ''
+  const actualProfile = u['actual-profile'] || ''
+  const displayProfile = actualProfile || assignedProfile
   return {
     id: u['.id'],
     serialNumber: extractRouterSerial(u),
     name: u.name || u.username || '',
     password: u.password || '',
-    profile: u['actual-profile'] || u.profile || '',
-    packageLabel: u['actual-profile'] || u.profile || '',
+    assignedProfile,
+    actualProfile,
+    profile: displayProfile,
+    packageLabel: displayProfile,
     comment: u.comment || '',
     location: u.location || '',
     pointOfSale: u.location || u.comment || '',
@@ -995,22 +1029,42 @@ function parseUsageSeconds(value) {
   return parseRosDurationToSeconds(value)
 }
 
-function resolveUserManagerCardStatus(user, activeUsernames) {
+function resolveUserManagerCardStatus(user, validProfiles = null) {
   if (user.disabled) {
-    return { status: 'disabled', label: 'معطّل' }
+    return { status: 'disabled', label: 'معطل' }
   }
-  if (isUserCurrentlyOnline(user, activeUsernames)) {
-    return { status: 'connected', label: 'متصل الآن' }
+
+  const assignedProfile = user.assignedProfile ?? ''
+  const actualProfile = user.actualProfile ?? ''
+  const hasAssigned = Boolean(assignedProfile)
+  const hasActual = Boolean(actualProfile)
+
+  if (hasAssigned && validProfiles?.size && !validProfiles.has(assignedProfile)) {
+    return { status: 'profile_error', label: 'خطاء في البروفايل' }
   }
 
   const usedSec = parseUsageSeconds(user.uptime)
   const limitSec = parseUsageSeconds(user.limitUptime)
-  const hasBytes = Number(user.bytesIn || 0) > 0 || Number(user.bytesOut || 0) > 0
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  const hasUsage = usedSec > 0 || bytesIn > 0 || bytesOut > 0
+  const balanceExhausted = limitSec > 0 && usedSec >= limitSec
 
-  if (limitSec > 0 && usedSec >= limitSec) {
+  if (!hasAssigned && !hasActual) {
+    return { status: 'profile_error', label: 'خطاء في البروفايل' }
+  }
+
+  if (hasAssigned && !hasActual) {
+    if (hasUsage || balanceExhausted) {
+      return { status: 'expired', label: 'انتهى الرصيد' }
+    }
+    return { status: 'available', label: 'انتظار' }
+  }
+
+  if (balanceExhausted) {
     return { status: 'expired', label: 'انتهى الرصيد' }
   }
-  if (usedSec > 0 || hasBytes) {
+  if (hasUsage) {
     return { status: 'active', label: 'نشط' }
   }
   return { status: 'available', label: 'انتظار' }
@@ -1020,12 +1074,11 @@ export async function getUserManagerInventory() {
   return withConnection(async (api) => {
     const um = await fetchUserManagerSnapshot(api)
 
-    const activeUsernames = new Set(
-      um.sessions.map((s) => s.user || s.username).filter(Boolean)
-    )
+    const profilesRaw = await api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => [])
+    const validProfiles = new Set((profilesRaw || []).map((p) => p.name).filter(Boolean))
 
     const cards = um.users.map((row) => {
-      const { status, label } = resolveUserManagerCardStatus(row, activeUsernames)
+      const { status, label } = resolveUserManagerCardStatus(row, validProfiles)
       const activeSession = um.sessions.find(
         (s) => (s.user || s.username) === row.name
       )
@@ -1046,9 +1099,10 @@ export async function getUserManagerInventory() {
     const summary = {
       total: cards.length,
       available: cards.filter((c) => c.status === 'available').length,
-      connected: cards.filter((c) => c.status === 'connected').length,
+      active: cards.filter((c) => c.status === 'active').length,
       expired: cards.filter((c) => c.status === 'expired').length,
       disabled: cards.filter((c) => c.status === 'disabled').length,
+      profile_error: cards.filter((c) => c.status === 'profile_error').length,
     }
 
     return {
@@ -1196,9 +1250,12 @@ async function countPrintedCardsForPeriod(filterOptions = {}) {
 function normalizeInventoryCardFilters(options = {}) {
   const status = String(options.status || 'all').trim()
   const source = String(options.source || 'all').trim()
-  const validStatuses = new Set(['available', 'active', 'connected', 'expired', 'disabled', 'missing', 'pending'])
+  const validStatuses = new Set([
+    'available', 'active', 'expired', 'disabled', 'profile_error', 'missing', 'pending',
+  ])
+  const normalizedStatus = status === 'connected' ? 'active' : status
   return {
-    status: validStatuses.has(status) ? status : null,
+    status: validStatuses.has(normalizedStatus) ? normalizedStatus : null,
     source: source === 'hotspot' || source === 'user-manager' ? source : null,
   }
 }
@@ -1265,7 +1322,7 @@ function invalidateRouterEnrichmentIndex() {
 }
 
 const HS_USER_PROPS = [
-  '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,password,last-logged-out,last-logged-in',
+  '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,limit-bytes-in,limit-bytes-out,password,last-logged-out,last-logged-in',
 ]
 const UM_USER_PROPS = [
   '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,last-seen',
@@ -1388,17 +1445,17 @@ async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
 
   const hotspotIndex = {
     byName: new Map(),
-    activeUsernames: new Set((activeHotspotSessions || []).map((s) => s.user).filter(Boolean)),
+    profileNames: new Set(),
     activeSessions: activeHotspotSessions || [],
   }
 
   const umIndex = {
     byName: new Map(),
-    activeUsernames: new Set((umSessionsRaw || []).flatMap((s) => [s.user, s.username].filter(Boolean))),
+    profileNames: new Set(),
     sessions: umSessionsRaw || [],
   }
 
-  const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
+  const [hotspotUsersRaw, umUsersRaw, hotspotProfilesRaw, umProfilesRaw] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
     printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
       if (isUserManagerUnavailable(error)) {
@@ -1407,7 +1464,16 @@ async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
       }
       throw error
     }),
+    api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
+    api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
   ])
+
+  for (const p of hotspotProfilesRaw || []) {
+    if (p.name) hotspotIndex.profileNames.add(p.name)
+  }
+  for (const p of umProfilesRaw || []) {
+    if (p.name) umIndex.profileNames.add(p.name)
+  }
 
   for (const u of hotspotUsersRaw || []) {
     const row = mapHotspotUserRow(u)
@@ -1431,31 +1497,37 @@ async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
 }
 
 async function buildRouterInventorySnapshot(api) {
-  const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw, umUserCount] = await Promise.all([
+  const [
+    hotspotUsersRaw,
+    activeHotspotSessions,
+    umUsersRaw,
+    umSessionsRaw,
+    umUserCount,
+    hotspotProfilesRaw,
+    umProfilesRaw,
+  ] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
     printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     printCount(api, '/tool/user-manager/user/print').catch(() => 0),
+    api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
+    api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
   ])
 
-  const activeHotspotUsernames = new Set(
-    (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
-  )
+  const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
+  const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
 
   const hotspotCards = (hotspotUsersRaw || []).map((u) => {
     const row = mapHotspotUserRow(u)
-    return buildHotspotInventoryCard(row, activeHotspotUsernames, activeHotspotSessions || [])
+    return buildHotspotInventoryCard(row, hotspotProfileNames, activeHotspotSessions || [])
   })
 
   const umSessions = umSessionsRaw || []
-  const activeUmUsernames = new Set(
-    umSessions.flatMap((s) => [s.user, s.username].filter(Boolean))
-  )
 
   const umCards = (umUsersRaw || []).map((u) => {
     const row = mapUserManagerUserRow(u)
-    return buildUserManagerInventoryCard(row, activeUmUsernames, umSessions)
+    return buildUserManagerInventoryCard(row, umProfileNames, umSessions)
   })
 
   const userManagerMeta = {
@@ -1488,48 +1560,19 @@ async function refreshSnapshotSessionStatuses(api, snapshot) {
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
   ])
-  const activeHotspotUsernames = new Set(
-    (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
-  )
   const umSessions = umSessionsRaw || []
-  const activeUmUsernames = new Set(
-    umSessions.flatMap((s) => [s.user, s.username].filter(Boolean))
-  )
 
   const cards = snapshot.cards.map((card) => {
     if (card.source === ROUTER_SOURCE.USER_MANAGER) {
-      const row = {
-        name: card.name,
-        disabled: card.disabled,
-        uptime: card.uptime || '',
-        limitUptime: card.limitUptime || '',
-        bytesIn: card.bytesIn || 0,
-        bytesOut: card.bytesOut || 0,
-        lastSeen: card.lastSeen || '',
-      }
-      const { status, label } = resolveUserManagerCardStatus(row, activeUmUsernames)
       const activeSession = umSessions.find((s) => (s.user || s.username) === card.name)
       return finishInventoryCard(card, {
-        status,
-        statusLabel: label,
         connectedIp: activeSession?.['ip-address'] || activeSession?.address || '',
         sessionUptime: activeSession?.uptime || '',
       })
     }
 
-    const row = {
-      name: card.name,
-      disabled: card.disabled,
-      uptime: card.uptime || '',
-      bytesIn: card.bytesIn || 0,
-      bytesOut: card.bytesOut || 0,
-      lastSeen: card.lastSeen || '',
-    }
-    const { status, label } = resolveCardStatus(row, activeHotspotUsernames)
     const activeSession = (activeHotspotSessions || []).find((s) => s.user === card.name)
     return finishInventoryCard(card, {
-      status,
-      statusLabel: label,
       connectedIp: activeSession?.address || '',
       sessionUptime: activeSession?.uptime || '',
     })
@@ -1545,26 +1588,7 @@ async function refreshSnapshotSessionStatuses(api, snapshot) {
 }
 
 async function getCachedRouterInventory({ refresh = false, filterOptions = {} } = {}) {
-  const cardFilters = normalizeInventoryCardFilters(filterOptions)
-  const lightConnectedRefresh = refresh && cardFilters.status === 'connected'
-
-  if (lightConnectedRefresh) {
-    const cached = routerInventoryCache
-    if (cached?.cards?.length) {
-      if (routerInventoryBuildPromise) return routerInventoryBuildPromise
-      routerInventoryBuildPromise = withInventoryConnection(async (api) => {
-        const updated = await refreshSnapshotSessionStatuses(api, cached)
-        routerInventoryCache = updated
-        routerInventoryCacheAt = Date.now()
-        return updated
-      }).finally(() => {
-        routerInventoryBuildPromise = null
-      })
-      return routerInventoryBuildPromise
-    }
-  }
-
-  if (refresh && !lightConnectedRefresh) {
+  if (refresh) {
     routerInventoryCache = null
     routerInventoryCacheAt = 0
     invalidateRouterEnrichmentIndex()
@@ -1700,9 +1724,9 @@ function computeInventorySummary(cards) {
     total: cards.length,
     available: cards.filter((c) => c.status === 'available').length,
     active: cards.filter((c) => c.status === 'active').length,
-    connected: cards.filter((c) => c.status === 'connected').length,
     expired: cards.filter((c) => c.status === 'expired').length,
     disabled: cards.filter((c) => c.status === 'disabled').length,
+    profile_error: cards.filter((c) => c.status === 'profile_error').length,
     missing: cards.filter((c) => c.status === 'missing').length,
     hotspot: cards.filter((c) => c.source === ROUTER_SOURCE.HOTSPOT).length,
     userManager: cards.filter((c) => c.source === ROUTER_SOURCE.USER_MANAGER).length,
@@ -1827,7 +1851,7 @@ function lookupDbRowsWithRouterIndex(dbRows, { hotspotIndex, umIndex }) {
         continue
       }
       cards.push({
-        ...buildUserManagerInventoryCard(row, umIndex.activeUsernames, umIndex.sessions),
+        ...buildUserManagerInventoryCard(row, umIndex.profileNames, umIndex.sessions),
         ...cardWithDate,
       })
       continue
@@ -1839,7 +1863,7 @@ function lookupDbRowsWithRouterIndex(dbRows, { hotspotIndex, umIndex }) {
       continue
     }
     cards.push({
-      ...buildHotspotInventoryCard(row, hotspotIndex.activeUsernames, hotspotIndex.activeSessions),
+      ...buildHotspotInventoryCard(row, hotspotIndex.profileNames, hotspotIndex.activeSessions),
       ...cardWithDate,
     })
   }
@@ -2027,8 +2051,8 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
   return { byName, activeUsernames, sessions: sessions || [] }
 }
 
-function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
-  const { status, label } = resolveCardStatus(row, activeUsernames)
+function buildHotspotInventoryCard(row, validProfiles, activeSessions) {
+  const { status, label } = resolveCardStatus(row, validProfiles)
   const activeSession = activeSessions.find((s) => s.user === row.name)
   return finishInventoryCard({
     ...row,
@@ -2042,8 +2066,8 @@ function buildHotspotInventoryCard(row, activeUsernames, activeSessions) {
   })
 }
 
-function buildUserManagerInventoryCard(row, activeUsernames, sessions) {
-  const { status, label } = resolveUserManagerCardStatus(row, activeUsernames)
+function buildUserManagerInventoryCard(row, validProfiles, sessions) {
+  const { status, label } = resolveUserManagerCardStatus(row, validProfiles)
   const activeSession = sessions.find((s) => (s.user || s.username) === row.name)
   return finishInventoryCard({
     ...row,
