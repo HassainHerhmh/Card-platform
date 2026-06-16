@@ -32,6 +32,13 @@ export const DEFAULT_PRINT_TEMPLATE = {
   },
 }
 
+const TEMPLATE_META_SELECT = `
+  SELECT pt.id, pt.name, pt.is_default, pt.category_id, pt.created_at, pt.updated_at,
+         c.name AS category_name
+  FROM print_templates pt
+  LEFT JOIN categories c ON c.id = pt.category_id
+`
+
 const TEMPLATE_SELECT = `
   SELECT pt.id, pt.name, pt.is_default, pt.category_id, pt.config, pt.created_at, pt.updated_at,
          c.name AS category_name
@@ -59,8 +66,7 @@ function parseConfig(raw) {
   }
 }
 
-function mapRow(row) {
-  const config = parseConfig(row.config)
+function mapMetaRow(row) {
   const categoryId = row.category_id != null ? Number(row.category_id) : null
   return {
     id: row.id,
@@ -68,9 +74,15 @@ function mapRow(row) {
     isDefault: Boolean(row.is_default),
     categoryId: Number.isFinite(categoryId) ? categoryId : null,
     categoryName: row.category_name || '',
-    config,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function mapRow(row) {
+  return {
+    ...mapMetaRow(row),
+    config: parseConfig(row.config),
   }
 }
 
@@ -101,9 +113,9 @@ async function ensureDefaultTemplate() {
 export async function listPrintTemplates() {
   await ensureDefaultTemplate()
   const { rows } = await query(
-    `${TEMPLATE_SELECT} ORDER BY pt.is_default DESC, pt.name ASC`
+    `${TEMPLATE_META_SELECT} ORDER BY pt.is_default DESC, pt.id ASC`
   )
-  return rows.map(mapRow)
+  return rows.map(mapMetaRow)
 }
 
 export async function getPrintTemplate(id) {
@@ -115,11 +127,12 @@ export async function getPrintTemplate(id) {
 export async function getDefaultPrintTemplate() {
   await ensureDefaultTemplate()
   const { rows } = await query(
-    `${TEMPLATE_SELECT} WHERE pt.is_default = 1 ORDER BY pt.id ASC LIMIT 1`
+    `${TEMPLATE_META_SELECT} WHERE pt.is_default = 1 ORDER BY pt.id ASC LIMIT 1`
   )
-  if (rows[0]) return mapRow(rows[0])
-  const all = await listPrintTemplates()
-  return all[0]
+  if (rows[0]) return getPrintTemplate(rows[0].id)
+  const { rows: fallback } = await query(`${TEMPLATE_META_SELECT} ORDER BY pt.id ASC LIMIT 1`)
+  if (fallback[0]) return getPrintTemplate(fallback[0].id)
+  throw new Error('لا توجد قوالب طباعة')
 }
 
 export async function getPrintTemplateForCategory(categoryId) {
@@ -127,10 +140,10 @@ export async function getPrintTemplateForCategory(categoryId) {
   if (!Number.isFinite(id) || id <= 0) return getDefaultPrintTemplate()
 
   const { rows } = await query(
-    `${TEMPLATE_SELECT} WHERE pt.category_id = $1 ORDER BY pt.id ASC LIMIT 1`,
+    `${TEMPLATE_META_SELECT} WHERE pt.category_id = $1 ORDER BY pt.id ASC LIMIT 1`,
     [id]
   )
-  if (rows[0]) return mapRow(rows[0])
+  if (rows[0]) return getPrintTemplate(rows[0].id)
   return getDefaultPrintTemplate()
 }
 
