@@ -903,10 +903,10 @@ export async function getUserManagerUsers() {
   })
 }
 
-function mapUserManagerUserRow(u) {
-  const assignedProfile = u.profile || ''
+function mapUserManagerUserRow(u, profileHint = '') {
+  const assignedProfile = u.profile || profileHint || ''
   const actualProfile = u['actual-profile'] || ''
-  const displayProfile = actualProfile || assignedProfile
+  const displayProfile = actualProfile || assignedProfile || profileHint
   return {
     id: u['.id'],
     serialNumber: extractRouterSerial(u),
@@ -928,6 +928,83 @@ function mapUserManagerUserRow(u) {
     registrationDate: u['registration-date'] || '',
     customer: u.customer || '',
   }
+}
+
+async function fetchUmUserProfileNameMap(api) {
+  const byUser = new Map()
+  const paths = [
+    '/tool/user-manager/user-profile/print',
+    '/user-manager/user-profile/print',
+  ]
+
+  for (const path of paths) {
+    try {
+      const rows = await api.write(path, ['=.proplist=user,username,profile,actual-profile'])
+      for (const row of rows || []) {
+        const userName = row.user || row.username
+        const profileName = row.profile || row['actual-profile']
+        if (userName && profileName) byUser.set(String(userName), String(profileName))
+      }
+      if (byUser.size > 0) break
+    } catch {
+      // try next path
+    }
+  }
+
+  return byUser
+}
+
+function buildUmProfileLimitsIndex(profilesRaw, limitsByProfile) {
+  const index = new Map()
+  for (const profile of profilesRaw || []) {
+    if (!profile?.name) continue
+    index.set(profile.name, limitsByProfile?.[profile.name] || {})
+  }
+  return index
+}
+
+function parseLimitBytes(value) {
+  if (value == null || value === '' || value === '0' || value === '00:00:00') return 0
+  const raw = String(value).trim().toLowerCase()
+  const direct = Number(raw)
+  if (Number.isFinite(direct) && direct > 0) return direct
+
+  const match = raw.match(/^([\d.]+)\s*([kmg])?/)
+  if (!match) return 0
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return 0
+  const unit = match[2]
+  if (unit === 'g') return Math.round(amount * 1073741824)
+  if (unit === 'm') return Math.round(amount * 1048576)
+  if (unit === 'k') return Math.round(amount * 1024)
+  return Math.round(amount)
+}
+
+function isUmBalanceExhausted(user, profileLimits = null) {
+  const usedSec = parseUsageSeconds(user.uptime)
+  const limitSec = parseUsageSeconds(user.limitUptime)
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  const totalBytes = bytesIn + bytesOut
+  const hasUsage = usedSec > 0 || bytesIn > 0 || bytesOut > 0
+
+  if (limitSec > 0 && usedSec >= limitSec) return true
+
+  const profileName = user.actualProfile || user.assignedProfile || user.profile || ''
+  const limits = profileName && profileLimits?.get ? profileLimits.get(profileName) : null
+  const transferLimit = parseLimitBytes(limits?.['transfer-limit'] ?? limits?.transferLimit)
+  const downloadLimit = parseLimitBytes(limits?.['download-limit'] ?? limits?.downloadLimit)
+  const uploadLimit = parseLimitBytes(limits?.['upload-limit'] ?? limits?.uploadLimit)
+
+  if (transferLimit > 0 && totalBytes >= Math.max(0, transferLimit - 2048)) return true
+  if (downloadLimit > 0 && bytesIn >= Math.max(0, downloadLimit - 2048)) return true
+  if (uploadLimit > 0 && bytesOut >= Math.max(0, uploadLimit - 2048)) return true
+
+  const hasAssigned = Boolean(user.assignedProfile)
+  const hasActual = Boolean(user.actualProfile)
+  if (hasUsage && (!hasActual || (!hasAssigned && !hasActual))) return true
+
+  return false
 }
 
 function extractRouterSerial(u) {
@@ -1070,7 +1147,7 @@ function parseUsageSeconds(value) {
   return parseRosDurationToSeconds(value)
 }
 
-function resolveUserManagerCardStatus(user, validProfiles = null) {
+function resolveUserManagerCardStatus(user, validProfiles = null, profileLimits = null) {
   if (user.disabled) {
     return { status: 'disabled', label: 'معطل' }
   }
@@ -1080,31 +1157,29 @@ function resolveUserManagerCardStatus(user, validProfiles = null) {
   const hasAssigned = Boolean(assignedProfile)
   const hasActual = Boolean(actualProfile)
 
-  if (hasAssigned && validProfiles?.size && !validProfiles.has(assignedProfile)) {
-    return { status: 'profile_error', label: 'خطاء في البروفايل' }
-  }
-
   const usedSec = parseUsageSeconds(user.uptime)
-  const limitSec = parseUsageSeconds(user.limitUptime)
   const bytesIn = Number(user.bytesIn || 0)
   const bytesOut = Number(user.bytesOut || 0)
   const hasUsage = usedSec > 0 || bytesIn > 0 || bytesOut > 0
-  const balanceExhausted = limitSec > 0 && usedSec >= limitSec
+
+  if (isUmBalanceExhausted(user, profileLimits)) {
+    return { status: 'expired', label: 'انتهى الرصيد' }
+  }
 
   if (!hasAssigned && !hasActual) {
+    return hasUsage
+      ? { status: 'expired', label: 'انتهى الرصيد' }
+      : { status: 'profile_error', label: 'خطاء في البروفايل' }
+  }
+
+  if (hasAssigned && validProfiles?.size && !validProfiles.has(assignedProfile) && !hasUsage) {
     return { status: 'profile_error', label: 'خطاء في البروفايل' }
   }
 
   if (hasAssigned && !hasActual) {
-    if (hasUsage || balanceExhausted) {
-      return { status: 'expired', label: 'انتهى الرصيد' }
-    }
     return { status: 'available', label: 'انتظار' }
   }
 
-  if (balanceExhausted) {
-    return { status: 'expired', label: 'انتهى الرصيد' }
-  }
   if (hasUsage) {
     return { status: 'active', label: 'نشط' }
   }
@@ -1115,16 +1190,23 @@ export async function getUserManagerInventory() {
   return withConnection(async (api) => {
     const um = await fetchUserManagerSnapshot(api)
 
-    const profilesRaw = await api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => [])
+    const profilesRaw = await api.write('/tool/user-manager/profile/print').catch(() => [])
     const validProfiles = new Set((profilesRaw || []).map((p) => p.name).filter(Boolean))
+    const limitsByProfile = await fetchUserManagerLimitationData(api, profilesRaw)
+    const profileLimits = buildUmProfileLimitsIndex(profilesRaw, limitsByProfile)
+    const userProfileMap = await fetchUmUserProfileNameMap(api)
 
     const cards = um.users.map((row) => {
-      const { status, label } = resolveUserManagerCardStatus(row, validProfiles)
+      const enriched = mapUserManagerUserRow(
+        { ...row, profile: row.assignedProfile, 'actual-profile': row.actualProfile },
+        userProfileMap.get(row.name) || ''
+      )
+      const { status, label } = resolveUserManagerCardStatus(enriched, validProfiles, profileLimits)
       const activeSession = um.sessions.find(
         (s) => (s.user || s.username) === row.name
       )
       return {
-        ...row,
+        ...enriched,
         status,
         statusLabel: label,
         connectedIp: activeSession?.['ip-address'] || activeSession?.address || '',
@@ -1756,6 +1838,7 @@ async function buildRouterInventorySnapshot(api) {
     umUserCount,
     hotspotProfilesRaw,
     umProfilesRaw,
+    umUserProfileMap,
   ] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], { onProgress: onHotspotProgress }),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
@@ -1763,11 +1846,14 @@ async function buildRouterInventorySnapshot(api) {
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     printCount(api, '/tool/user-manager/user/print').catch(() => 0),
     api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
-    api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
+    api.write('/tool/user-manager/profile/print').catch(() => []),
+    fetchUmUserProfileNameMap(api),
   ])
 
   setRouterInventoryBuildProgress('building', totalExpected, totalExpected)
 
+  const limitsByProfile = await fetchUserManagerLimitationData(api, umProfilesRaw)
+  const umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
   const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
   const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
 
@@ -1779,8 +1865,9 @@ async function buildRouterInventorySnapshot(api) {
   const umSessions = umSessionsRaw || []
 
   const umCards = (umUsersRaw || []).map((u) => {
-    const row = mapUserManagerUserRow(u)
-    return buildUserManagerInventoryCard(row, umProfileNames, umSessions)
+    const userName = u.name || u.username || ''
+    const row = mapUserManagerUserRow(u, umUserProfileMap.get(userName) || '')
+    return buildUserManagerInventoryCard(row, umProfileNames, umSessions, umProfileLimits)
   })
 
   const userManagerMeta = {
@@ -1819,13 +1906,15 @@ async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
     umSessionsRaw,
     hotspotProfilesRaw,
     umProfilesRaw,
+    umUserProfileMap,
     hotspotUsersRaw,
     umUsersRaw,
   ] = await Promise.all([
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
-    api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
+    api.write('/tool/user-manager/profile/print').catch(() => []),
+    fetchUmUserProfileNameMap(api),
     !sourceFilter || sourceFilter === ROUTER_SOURCE.HOTSPOT
       ? fetchRouterUsersByQuery(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], disabledQuery)
       : Promise.resolve([]),
@@ -1834,6 +1923,8 @@ async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
       : Promise.resolve([]),
   ])
 
+  const limitsByProfile = await fetchUserManagerLimitationData(api, umProfilesRaw)
+  const umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
   const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
   const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
 
@@ -1844,8 +1935,9 @@ async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
 
   const umSessions = umSessionsRaw || []
   const umCards = (umUsersRaw || []).map((u) => {
-    const row = mapUserManagerUserRow(u)
-    return buildUserManagerInventoryCard(row, umProfileNames, umSessions)
+    const userName = u.name || u.username || ''
+    const row = mapUserManagerUserRow(u, umUserProfileMap.get(userName) || '')
+    return buildUserManagerInventoryCard(row, umProfileNames, umSessions, umProfileLimits)
   })
 
   const cards = [...hotspotCards, ...umCards]
@@ -2438,8 +2530,8 @@ function buildHotspotInventoryCard(row, validProfiles, activeSessions) {
   })
 }
 
-function buildUserManagerInventoryCard(row, validProfiles, sessions) {
-  const { status, label } = resolveUserManagerCardStatus(row, validProfiles)
+function buildUserManagerInventoryCard(row, validProfiles, sessions, profileLimits = null) {
+  const { status, label } = resolveUserManagerCardStatus(row, validProfiles, profileLimits)
   const activeSession = sessions.find((s) => (s.user || s.username) === row.name)
   return finishInventoryCard({
     ...row,
