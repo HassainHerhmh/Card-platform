@@ -42,10 +42,12 @@ export async function migrate() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
       is_default TINYINT(1) NOT NULL DEFAULT 0,
+      category_id INT NULL,
       config JSON NOT NULL,
       created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )`,
+    'ALTER TABLE print_templates ADD COLUMN category_id INT NULL',
   ]
 
   for (const patch of patches) {
