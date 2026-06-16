@@ -168,3 +168,52 @@ export async function getAgentTransactions(agentId, limit = 20) {
     }
   })
 }
+
+export async function getAgentStatement(agentId, {
+  fromDate,
+  toDate,
+  type,
+  queryText,
+  limit = 200,
+} = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 500)
+  const params = [agentId]
+  const clauses = ['l.agent_id = $1']
+
+  if (fromDate) {
+    params.push(fromDate)
+    clauses.push(`l.\`date\` >= $${params.length}`)
+  }
+  if (toDate) {
+    params.push(toDate)
+    clauses.push(`l.\`date\` <= $${params.length}`)
+  }
+  if (type) {
+    params.push(type)
+    clauses.push(`l.\`type\` = $${params.length}`)
+  }
+  if (queryText) {
+    params.push(`%${String(queryText).trim()}%`)
+    clauses.push(`(l.description LIKE $${params.length} OR CAST(l.reference_id AS CHAR) LIKE $${params.length})`)
+  }
+
+  const { rows } = await query(
+    `SELECT l.id, l.\`date\`, l.\`type\`, l.description, l.amount, l.balance, l.cards, l.reference_id AS referenceId
+     FROM ledger l
+     WHERE ${clauses.join(' AND ')}
+     ORDER BY l.\`date\` DESC, l.id DESC
+     LIMIT ${safeLimit}`,
+    params
+  )
+
+  return rows.map((row) => ({
+    id: row.id,
+    date: formatDate(row.date),
+    type: row.type,
+    description: row.description || '',
+    amount: Number(row.amount) || 0,
+    balance: Number(row.balance) || 0,
+    cards: Number(row.cards) || 0,
+    referenceId: row.referenceId ?? null,
+  }))
+}

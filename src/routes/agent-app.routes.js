@@ -60,6 +60,22 @@ router.get('/transactions', async (req, res) => {
   }
 })
 
+router.get('/statement', async (req, res) => {
+  try {
+    const statement = await agentAppService.getAgentStatement(req.agent.id, {
+      fromDate: req.query.fromDate,
+      toDate: req.query.toDate,
+      type: req.query.type,
+      queryText: req.query.query,
+      limit: req.query.limit,
+    })
+    res.json({ statement })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب كشف الحساب' })
+  }
+})
+
 router.get('/sms-service', async (_req, res) => {
   try {
     const status = await smsGatewayService.getSmsServiceStatus()
