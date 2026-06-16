@@ -38,6 +38,14 @@ export async function migrate() {
     'ALTER TABLE categories ADD COLUMN duration_hours INT NOT NULL DEFAULT 24',
     'ALTER TABLE categories ADD COLUMN duration_minutes INT NOT NULL DEFAULT 0',
     'ALTER TABLE transit_account_settings ADD COLUMN card_income_account INT NULL',
+    `CREATE TABLE IF NOT EXISTS print_templates (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      is_default TINYINT(1) NOT NULL DEFAULT 0,
+      config JSON NOT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
   ]
 
   for (const patch of patches) {

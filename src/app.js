@@ -6,6 +6,7 @@ import usersRoutes from './routes/users.routes.js'
 import settingsRoutes from './routes/settings.routes.js'
 import agentsRoutes from './routes/agents.routes.js'
 import cardsRoutes from './routes/cards.routes.js'
+import printTemplatesRoutes from './routes/print-templates.routes.js'
 import ledgerRoutes from './routes/ledger.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
 import permissionsRoutes from './routes/permissions.routes.js'
@@ -45,7 +46,7 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json({ limit: '100kb' }))
+app.use(express.json({ limit: '2mb' }))
 
 app.get('/api/health', async (_req, res) => {
   let dbConnected = false
@@ -76,6 +77,7 @@ app.use('/api/users', usersRoutes)
 app.use('/api/settings', settingsRoutes)
 app.use('/api/agents', agentsRoutes)
 app.use('/api/cards', cardsRoutes)
+app.use('/api/print-templates', printTemplatesRoutes)
 app.use('/api/ledger', ledgerRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/permissions', permissionsRoutes)
