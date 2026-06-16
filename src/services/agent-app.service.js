@@ -198,7 +198,9 @@ export async function getAgentStatement(agentId, {
   }
 
   const { rows } = await query(
-    `SELECT l.id, l.\`date\`, l.\`type\`, l.description, l.amount, l.balance, l.cards, l.reference_id AS referenceId
+    `SELECT l.id, l.\`date\`, l.\`type\`,
+            COALESCE(NULLIF(TRIM(l.description), ''), CONCAT('مرجع العملية: ', l.reference_id)) AS description,
+            l.amount, l.balance, l.cards, l.reference_id AS referenceId
      FROM ledger l
      WHERE ${clauses.join(' AND ')}
      ORDER BY l.\`date\` DESC, l.id DESC
@@ -207,9 +209,12 @@ export async function getAgentStatement(agentId, {
   )
 
   return rows.map((row) => ({
+    // In accounting report: positive balance means "عليه".
+    // For agent app display requested by user: "له" should appear positive.
+    displayBalance: (Number(row.balance) || 0) * -1,
     id: row.id,
     date: formatDate(row.date),
-    type: row.type,
+    type: row.type === 'سحب' ? 'سند قبض' : row.type,
     description: row.description || '',
     amount: Number(row.amount) || 0,
     balance: Number(row.balance) || 0,
