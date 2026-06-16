@@ -40,6 +40,10 @@ export const env = {
     user: process.env.MIKROTIK_USER || '',
     password: process.env.MIKROTIK_PASSWORD || '',
     useTls: process.env.MIKROTIK_USE_TLS === 'true',
+    /** مهلة إنشاء الاتصال بالراوتر (ثوانٍ) — افتراضي 12 ثانية */
+    connectTimeout: Number(process.env.MIKROTIK_CONNECT_TIMEOUT) || 12,
+    /** مهلة أوامر الراوتر العادية (ثوانٍ) */
+    operationTimeout: Number(process.env.MIKROTIK_OPERATION_TIMEOUT) || 30,
     /** مهلة جلب مخزون الراوتر الكامل (ثوانٍ) — افتراضي 3 دقائق لراوترات كبيرة */
     inventoryTimeout: Number(process.env.MIKROTIK_INVENTORY_TIMEOUT) || 180,
     /** أقصى عدد كروت في مخزون الراوتر (بدون قص عند 10 آلاف) */

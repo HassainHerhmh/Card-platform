@@ -31,7 +31,6 @@ function getConnectionConfig() {
     port,
     user: env.mikrotik.user,
     password: env.mikrotik.password,
-    timeout: 25,
     tls: env.mikrotik.useTls ? { rejectUnauthorized: false } : undefined,
   }
 }
@@ -41,63 +40,105 @@ function formatHost(cfg) {
   return `${cfg.host}:${cfg.port}`
 }
 
-async function withConnection(fn) {
+function getConnectTimeoutSec() {
+  return Math.max(5, Number(env.mikrotik.connectTimeout) || 12)
+}
+
+function getOperationTimeoutSec(forInventory = false) {
+  if (forInventory) {
+    return Math.max(30, Number(env.mikrotik.inventoryTimeout) || 180)
+  }
+  return Math.max(10, Number(env.mikrotik.operationTimeout) || 30)
+}
+
+function createRouterApi(forInventory = false) {
   const cfg = getConnectionConfig()
   if (!cfg.host || !cfg.user || !cfg.password) {
     throw new Error('إعدادات الميكروتك غير مكتملة في ملف .env على السيرفر')
   }
 
+  const connectTimeout = getConnectTimeoutSec()
   const api = new RouterOSAPI({
     host: cfg.host,
     port: cfg.port,
     user: cfg.user,
     password: cfg.password,
-    timeout: cfg.timeout,
+    timeout: connectTimeout,
     tls: cfg.tls,
   })
 
+  return { cfg, api, operationTimeout: getOperationTimeoutSec(forInventory) }
+}
+
+async function connectRouter(api, operationTimeoutSec) {
+  const connectTimeoutMs = getConnectTimeoutSec() * 1000
+  let connectTimer = null
+
   try {
-    await api.connect()
+    await Promise.race([
+      api.connect(),
+      new Promise((_, reject) => {
+        connectTimer = setTimeout(() => reject(new Error('CONNECT_TIMEOUT')), connectTimeoutMs)
+      }),
+    ])
+  } catch (error) {
+    if (error?.message === 'CONNECT_TIMEOUT') {
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => api.close()),
+          new Promise((resolve) => { setTimeout(resolve, 2000) }),
+        ])
+      } catch {
+        // ignore close errors
+      }
+      throw new Error(`انتهت مهلة الاتصال (${getConnectTimeoutSec()} ث) — السيرفر لا يصل للراوتر بسرعة. تحقق من ${formatHost(getConnectionConfig())}`)
+    }
+    throw new Error(mapConnectionError(error))
+  } finally {
+    if (connectTimer) clearTimeout(connectTimer)
+  }
+
+  const opTimeout = Math.max(getConnectTimeoutSec(), Number(operationTimeoutSec) || getOperationTimeoutSec())
+  if (api.connector) {
+    api.connector.timeout = opTimeout
+    if (api.connector.socket) {
+      api.connector.socket.setTimeout(opTimeout * 1000)
+    }
+  }
+  api.timeout = opTimeout
+}
+
+async function closeRouter(api) {
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => api.close()),
+      new Promise((resolve) => { setTimeout(resolve, 3000) }),
+    ])
+  } catch {
+    // ignore close errors
+  }
+}
+
+async function withConnection(fn) {
+  const { cfg, api, operationTimeout } = createRouterApi(false)
+
+  try {
+    await connectRouter(api, operationTimeout)
     return await fn(api, cfg)
   } finally {
-    try {
-      await Promise.race([
-        Promise.resolve().then(() => api.close()),
-        new Promise((resolve) => { setTimeout(resolve, 3000) }),
-      ])
-    } catch {
-      // ignore close errors
-    }
+    await closeRouter(api)
   }
 }
 
 async function withInventoryConnection(fn) {
-  const cfg = getConnectionConfig()
-  if (!cfg.host || !cfg.user || !cfg.password) {
-    throw new Error('إعدادات الميكروتك غير مكتملة في ملف .env على السيرفر')
-  }
+  const { cfg, api, operationTimeout } = createRouterApi(true)
 
-  const api = new RouterOSAPI({
-    host: cfg.host,
-    port: cfg.port,
-    user: cfg.user,
-    password: cfg.password,
-    timeout: env.mikrotik.inventoryTimeout,
-    tls: cfg.tls,
-  })
-
+  setRouterInventoryBuildProgress('connecting', 0, 0)
   try {
-    await api.connect()
+    await connectRouter(api, operationTimeout)
     return await fn(api, cfg)
   } finally {
-    try {
-      await Promise.race([
-        Promise.resolve().then(() => api.close()),
-        new Promise((resolve) => { setTimeout(resolve, 3000) }),
-      ])
-    } catch {
-      // ignore close errors
-    }
+    await closeRouter(api)
   }
 }
 
@@ -1352,7 +1393,9 @@ export async function getInventoryCount(filterOptions = {}) {
     }
 
     if (refresh) {
-      ensureRouterInventoryBuild()
+      void ensureRouterInventoryBuild().catch((error) => {
+        console.error('[mikrotik] inventory build failed:', error.message)
+      })
       const progress = getRouterInventorySyncProgress()
       if (routerInventoryBuildPromise || progress.active) {
         return {
@@ -1477,6 +1520,17 @@ function finishRouterInventoryBuildProgress(total) {
     fetched: safeTotal,
     total: safeTotal,
     percent: 100,
+  }
+}
+
+function markRouterInventoryBuildError(error) {
+  routerInventoryBuildProgress = {
+    active: false,
+    phase: 'error',
+    fetched: 0,
+    total: 0,
+    percent: 0,
+    error: mapConnectionError(error),
   }
 }
 
@@ -1848,7 +1902,7 @@ function ensureRouterInventoryBuild() {
       return snapshot
     })
     .catch((error) => {
-      resetRouterInventoryBuildProgress()
+      markRouterInventoryBuildError(error)
       throw error
     })
     .finally(() => {
