@@ -46,7 +46,7 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json({ limit: '2mb' }))
+app.use(express.json({ limit: '5mb' }))
 
 app.get('/api/health', async (_req, res) => {
   let dbConnected = false
