@@ -1009,10 +1009,66 @@ function isUmBalanceExhausted(user, profileLimits = null) {
 
 function extractRouterSerial(u) {
   const regKey = u['reg-key']
-  if (regKey != null && regKey !== '') return String(regKey)
+  if (regKey != null && regKey !== '' && regKey !== '0') return String(regKey)
   const id = u['.id']
   if (id != null && id !== '') return String(id).replace(/^\*/, '')
   return ''
+}
+
+async function loadPlatformCardIndex({ refresh = false } = {}) {
+  const now = Date.now()
+  if (!refresh && platformCardIndex && now - platformCardIndexAt < PLATFORM_CARD_INDEX_MS) {
+    return platformCardIndex
+  }
+
+  const { rows } = await query(
+    `SELECT c.id AS cardId, c.code, c.status AS dbStatus, b.category_name AS categoryName,
+            b.printed_at AS printedAt, b.router_source AS routerSource,
+            COALESCE(cat.router_profile, b.category_name) AS profile,
+            a.name AS agentName
+     FROM cards c
+     INNER JOIN batches b ON b.id = c.batch_id
+     LEFT JOIN categories cat ON cat.id = b.category_id
+     LEFT JOIN agents a ON a.id = b.agent_id`
+  )
+
+  const byCode = new Map()
+  for (const row of rows || []) {
+    if (row.code) byCode.set(String(row.code), row)
+  }
+
+  platformCardIndex = byCode
+  platformCardIndexAt = now
+  return byCode
+}
+
+function enrichInventoryCardsWithPlatform(cards, platformIndex) {
+  if (!platformIndex?.size || !cards?.length) return cards
+
+  return cards.map((card) => {
+    const meta = platformIndex.get(card.name)
+    if (!meta) return card
+
+    return finishInventoryCard(card, {
+      serialNumber: meta.cardId != null ? String(meta.cardId) : card.serialNumber,
+      pointOfSale: meta.agentName || card.pointOfSale || '',
+      printedAt: meta.printedAt ?? card.printedAt,
+      dbStatus: meta.dbStatus ?? card.dbStatus,
+      packageLabel: card.packageLabel || meta.profile || meta.categoryName || '',
+    })
+  })
+}
+
+async function applyPlatformInventoryEnrichment(snapshot, { refresh = false } = {}) {
+  if (!snapshot?.cards?.length) return snapshot
+
+  const platformIndex = await loadPlatformCardIndex({ refresh })
+  const cards = enrichInventoryCardsWithPlatform(snapshot.cards, platformIndex)
+  return {
+    ...snapshot,
+    cards,
+    summary: computeInventorySummary(cards),
+  }
 }
 
 function formatTrafficAmount(value) {
@@ -1563,8 +1619,11 @@ let routerInventoryBuildProgress = {
 }
 let disabledRouterInventoryCache = null
 let disabledRouterInventoryCacheAt = 0
+let platformCardIndex = null
+let platformCardIndexAt = 0
 const ROUTER_INVENTORY_CACHE_MS = 24 * 60 * 60 * 1000
 const DISABLED_INVENTORY_CACHE_MS = 5 * 60 * 1000
+const PLATFORM_CARD_INDEX_MS = 5 * 60 * 1000
 
 export function getRouterInventorySyncProgress() {
   return { ...routerInventoryBuildProgress }
@@ -1629,7 +1688,7 @@ const HS_USER_PROPS = [
   '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,limit-bytes-in,limit-bytes-out,password,last-logged-out,last-logged-in',
 ]
 const UM_USER_PROPS = [
-  '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,last-seen',
+  '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,last-seen,reg-key',
   '=.proplist=name,username,profile,disabled,password,comment,location',
   '=.proplist=name,username,profile,disabled',
 ]
@@ -1970,9 +2029,10 @@ async function getDisabledRouterInventorySnapshot(filterOptions = {}, { refresh 
     return disabledRouterInventoryCache
   }
   const snapshot = await withInventoryConnection((api) => buildDisabledRouterInventorySnapshot(api, filterOptions))
-  disabledRouterInventoryCache = snapshot
+  const enriched = await applyPlatformInventoryEnrichment(snapshot, { refresh })
+  disabledRouterInventoryCache = enriched
   disabledRouterInventoryCacheAt = now
-  return snapshot
+  return enriched
 }
 
 function ensureRouterInventoryBuild() {
@@ -1987,11 +2047,12 @@ function ensureRouterInventoryBuild() {
   setRouterInventoryBuildProgress('starting', 0, 0)
 
   routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
-    .then((snapshot) => {
-      routerInventoryCache = snapshot
+    .then(async (snapshot) => {
+      const enriched = await applyPlatformInventoryEnrichment(snapshot, { refresh: true })
+      routerInventoryCache = enriched
       routerInventoryCacheAt = Date.now()
-      finishRouterInventoryBuildProgress(snapshot.cards.length)
-      return snapshot
+      finishRouterInventoryBuildProgress(enriched.cards.length)
+      return enriched
     })
     .catch((error) => {
       markRouterInventoryBuildError(error)
