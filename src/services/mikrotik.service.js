@@ -1267,12 +1267,35 @@ function applyInventoryCardFilters(cards, filters) {
   return result
 }
 
+function hasActiveInventoryCardFilters(cardFilters) {
+  return Boolean(cardFilters?.status || cardFilters?.source)
+}
+
+async function fetchRouterUsersByQuery(api, path, primaryProplist, queryArgs = []) {
+  try {
+    const rows = await api.write(path, [primaryProplist, ...queryArgs])
+    if (Array.isArray(rows) && rows.length > 0) return dedupeRouterRows(rows)
+  } catch (error) {
+    if (isUserManagerUnavailable(error)) return []
+    throw error
+  }
+
+  try {
+    const rows = await api.write(path, queryArgs)
+    return dedupeRouterRows(rows || [])
+  } catch (error) {
+    if (isUserManagerUnavailable(error)) return []
+    throw error
+  }
+}
+
 export async function getInventoryCount(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
     const cap = getInventoryMaxCap()
     const cardFilters = normalizeInventoryCardFilters(filterOptions)
+    const hasCardFilter = hasActiveInventoryCardFilters(cardFilters)
 
     if (refresh && cardFilters.status === 'disabled') {
       const snapshot = await getDisabledRouterInventorySnapshot(filterOptions, { refresh: true })
@@ -1291,6 +1314,40 @@ export async function getInventoryCount(filterOptions = {}) {
         needsRefresh: false,
         fetchedAt: snapshot.fetchedAt,
         fastFilter: true,
+      }
+    }
+
+    if (refresh && hasCardFilter) {
+      const snapshot = await getCachedRouterInventory({ refresh: false, filterOptions })
+      if (snapshot?.cards?.length) {
+        const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+        const routerTotal = filtered.length
+        return {
+          total: Math.min(routerTotal, cap),
+          dbTotal: 0,
+          routerTotal,
+          truncated: routerTotal > cap,
+          period: filter.period,
+          periodLabel: filter.periodLabel,
+          routerSource: true,
+          cached: true,
+          building: false,
+          needsRefresh: false,
+          fetchedAt: snapshot.fetchedAt,
+        }
+      }
+      return {
+        total: 0,
+        dbTotal: 0,
+        routerTotal: 0,
+        truncated: false,
+        period: filter.period,
+        periodLabel: filter.periodLabel,
+        routerSource: true,
+        cached: false,
+        building: false,
+        needsRefresh: true,
+        message: 'لا يوجد مخزون محفوظ لهذه الفلترة — حدّث «الكل» أولاً أو استخدم فلتر «معطّل» للتحديث السريع',
       }
     }
 
@@ -1716,10 +1773,10 @@ async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
     api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
     api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
     !sourceFilter || sourceFilter === ROUTER_SOURCE.HOTSPOT
-      ? printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], { extraArgs: disabledQuery })
+      ? fetchRouterUsersByQuery(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], disabledQuery)
       : Promise.resolve([]),
     !sourceFilter || sourceFilter === ROUTER_SOURCE.USER_MANAGER
-      ? printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS, { extraArgs: disabledQuery })
+      ? fetchRouterUsersByQuery(api, '/tool/user-manager/user/print', UM_USER_PROPS[0], disabledQuery)
       : Promise.resolve([]),
   ])
 
@@ -1739,6 +1796,8 @@ async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
 
   const cards = [...hotspotCards, ...umCards]
   cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  console.info(`[mikrotik] disabled-only inventory: ${cards.length} cards (HS ${hotspotCards.length}, UM ${umCards.length})`)
 
   return {
     cards,
@@ -1833,6 +1892,13 @@ async function refreshSnapshotSessionStatuses(api, snapshot) {
 
 async function getCachedRouterInventory({ refresh = false, filterOptions = {} } = {}) {
   if (refresh) {
+    const cardFilters = normalizeInventoryCardFilters(filterOptions)
+    if (cardFilters.status === 'disabled') {
+      return getDisabledRouterInventorySnapshot(filterOptions, { refresh: true })
+    }
+    if (hasActiveInventoryCardFilters(cardFilters)) {
+      return getCachedRouterInventory({ refresh: false, filterOptions })
+    }
     if (routerInventoryBuildPromise) return routerInventoryBuildPromise
     return ensureRouterInventoryBuild()
   }
@@ -1847,6 +1913,7 @@ async function getCachedRouterInventory({ refresh = false, filterOptions = {} } 
 async function getFilteredRouterInventory(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
   const cardFilters = normalizeInventoryCardFilters(filterOptions)
+  const hasCardFilter = hasActiveInventoryCardFilters(cardFilters)
 
   if (refresh && cardFilters.status === 'disabled') {
     const snapshot = await getDisabledRouterInventorySnapshot(filterOptions, { refresh: true })
@@ -1854,7 +1921,18 @@ async function getFilteredRouterInventory(filterOptions = {}) {
     return { snapshot, filtered, cardFilters }
   }
 
-  if (routerInventoryBuildPromise) {
+  if (refresh && hasCardFilter) {
+    const snapshot = await getCachedRouterInventory({ refresh: false, filterOptions })
+    if (snapshot?.cards?.length) {
+      const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+      return { snapshot, filtered, cardFilters }
+    }
+    return { snapshot: null, filtered: [], cardFilters }
+  }
+
+  if (refresh && !hasCardFilter) {
+    await getCachedRouterInventory({ refresh: true, filterOptions })
+  } else if (!hasCardFilter && routerInventoryBuildPromise) {
     await routerInventoryBuildPromise
   }
 
