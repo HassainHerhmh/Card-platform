@@ -42,6 +42,8 @@ export const env = {
     useTls: process.env.MIKROTIK_USE_TLS === 'true',
     /** مهلة جلب مخزون الراوتر الكامل (ثوانٍ) — افتراضي 3 دقائق لراوترات كبيرة */
     inventoryTimeout: Number(process.env.MIKROTIK_INVENTORY_TIMEOUT) || 180,
+    /** أقصى عدد كروت في مخزون الراوتر (بدون قص عند 10 آلاف) */
+    inventoryMaxCards: Number(process.env.MIKROTIK_INVENTORY_MAX) || 50000,
     /** اختياري — يُستخدم فقط إذا أردت تجاوز العميل المكتشف من الراوتر */
     userManagerCustomerOverride: process.env.MIKROTIK_UM_CUSTOMER || '',
   },

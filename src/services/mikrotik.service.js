@@ -1,5 +1,4 @@
 import { RouterOSAPI } from 'node-routeros'
-import { gzipSync, gunzipSync } from 'zlib'
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
 import {
@@ -10,17 +9,8 @@ import {
 } from '../constants/routerSource.js'
 import { formatDurationLabel, parseRosTime, parseTimeHms, parseValidityPeriod } from '../utils/duration.js'
 
-function parseDbJson(value, fallback = null) {
-  if (value == null || value === '') return fallback
-  if (typeof value === 'object') return value
-  if (typeof value === 'string') {
-    try {
-      return JSON.parse(value)
-    } catch {
-      return fallback
-    }
-  }
-  return fallback
+function getInventoryMaxCap() {
+  return Math.max(1000, Number(env.mikrotik.inventoryMaxCards) || 50000)
 }
 
 function getConnectionConfig() {
@@ -1193,7 +1183,7 @@ async function countPrintedCardsForPeriod(filterOptions = {}) {
     params
   )
   const dbTotal = Number(rows[0]?.cnt) || 0
-  const cap = 10000
+  const cap = getInventoryMaxCap()
   return {
     total: Math.min(dbTotal, cap),
     dbTotal,
@@ -1224,8 +1214,8 @@ export async function getInventoryCount(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
-    const cap = 10000
-    const snapshot = await getCachedRouterInventory({ refresh })
+    const cap = getInventoryMaxCap()
+    const snapshot = await getCachedRouterInventory({ refresh, filterOptions })
     if (!snapshot?.cards?.length) {
       return {
         total: 0,
@@ -1274,74 +1264,6 @@ function invalidateRouterEnrichmentIndex() {
   routerEnrichmentIndexAt = 0
 }
 
-async function loadPersistedRouterInventory() {
-  try {
-    const { rows } = await query(
-      `SELECT cards_blob AS cardsBlob, summary_json AS summaryJson, sources_json AS sourcesJson,
-              user_manager_json AS userManagerJson, card_count AS cardCount, fetched_at AS fetchedAt
-       FROM router_inventory_cache WHERE id = 1 LIMIT 1`
-    )
-    const row = rows[0]
-    if (!row?.cardsBlob) return null
-
-    const cardsBlob = row.cardsBlob
-    const cardsJson = Buffer.isBuffer(cardsBlob)
-      ? gunzipSync(cardsBlob).toString('utf8')
-      : gunzipSync(Buffer.from(cardsBlob)).toString('utf8')
-    const cards = JSON.parse(cardsJson)
-    if (!Array.isArray(cards) || !cards.length) return null
-
-    return {
-      cards,
-      summary: parseDbJson(row.summaryJson, computeInventorySummary(cards)),
-      sources: parseDbJson(row.sourcesJson, { hotspot: true, userManager: false }),
-      userManager: parseDbJson(row.userManagerJson, {
-        available: false,
-        customers: [],
-        defaultCustomer: null,
-        profiles: 0,
-      }),
-      fetchedAt: row.fetchedAt ? new Date(row.fetchedAt).toISOString() : new Date().toISOString(),
-      fromPersisted: true,
-    }
-  } catch (error) {
-    console.warn('[mikrotik] load persisted inventory failed:', error.message)
-    return null
-  }
-}
-
-async function savePersistedRouterInventory(snapshot) {
-  try {
-    const cardsBlob = gzipSync(JSON.stringify(snapshot.cards))
-    const summaryJson = JSON.stringify(snapshot.summary || computeInventorySummary(snapshot.cards))
-    const sourcesJson = JSON.stringify(snapshot.sources || {})
-    const userManagerJson = JSON.stringify(snapshot.userManager || {})
-    await query(
-      `INSERT INTO router_inventory_cache
-         (id, cards_blob, summary_json, sources_json, user_manager_json, card_count, fetched_at)
-       VALUES (1, $1, $2, $3, $4, $5, $6)
-       ON DUPLICATE KEY UPDATE
-         cards_blob = VALUES(cards_blob),
-         summary_json = VALUES(summary_json),
-         sources_json = VALUES(sources_json),
-         user_manager_json = VALUES(user_manager_json),
-         card_count = VALUES(card_count),
-         fetched_at = VALUES(fetched_at)`,
-      [
-        cardsBlob,
-        summaryJson,
-        sourcesJson,
-        userManagerJson,
-        snapshot.cards.length,
-        snapshot.fetchedAt ? new Date(snapshot.fetchedAt) : new Date(),
-      ]
-    )
-    console.info(`[mikrotik] persisted router inventory: ${snapshot.cards.length} cards`)
-  } catch (error) {
-    console.warn('[mikrotik] save persisted inventory failed:', error.message)
-  }
-}
-
 const HS_USER_PROPS = [
   '=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out,limit-uptime,password,last-logged-out,last-logged-in',
 ]
@@ -1351,31 +1273,99 @@ const UM_USER_PROPS = [
   '=.proplist=name,username,profile,disabled',
 ]
 
+const ROUTER_PRINT_PAGE_HINT = 1000
+
+function dedupeRouterRows(rows) {
+  const seen = new Set()
+  const out = []
+  for (const row of rows || []) {
+    const id = row['.id']
+    if (id) {
+      if (seen.has(id)) continue
+      seen.add(id)
+    }
+    out.push(row)
+  }
+  return out
+}
+
+async function fetchPrintPages(api, path, proplist, expected = 0) {
+  const all = []
+  let cursor = ''
+
+  for (let page = 0; page < 200; page++) {
+    const args = []
+    if (proplist) args.push(proplist)
+    if (cursor) args.push(`?#>.id=${cursor}`)
+
+    let batch
+    try {
+      batch = await api.write(path, args)
+    } catch (error) {
+      if (isUserManagerUnavailable(error)) return dedupeRouterRows(all)
+      if (page === 0) throw error
+      break
+    }
+
+    if (!Array.isArray(batch) || !batch.length) break
+
+    const before = all.length
+    for (const row of batch) {
+      const id = row['.id']
+      if (id && all.some((r) => r['.id'] === id)) continue
+      all.push(row)
+    }
+    if (all.length === before) break
+
+    const lastId = batch[batch.length - 1]?.['.id']
+    if (!lastId) break
+    if (expected > 0 && all.length >= expected) break
+    if (batch.length < ROUTER_PRINT_PAGE_HINT) break
+
+    cursor = lastId
+  }
+
+  const unique = dedupeRouterRows(all)
+  if (expected > 0 && unique.length < expected) {
+    console.warn(`[mikrotik] ${path} pagination got ${unique.length}/${expected}`)
+  }
+  return unique
+}
+
 async function printWithProplistFallback(api, path, proplistOrList) {
   const proplists = Array.isArray(proplistOrList) ? proplistOrList : [proplistOrList]
+  const expected = await printCount(api, path).catch(() => 0)
 
   for (const proplist of proplists) {
     try {
       const withProps = await api.write(path, [proplist])
-      if (Array.isArray(withProps) && withProps.length > 0) return withProps
+      if (Array.isArray(withProps) && withProps.length > 0) {
+        if (!expected || withProps.length >= expected) return dedupeRouterRows(withProps)
+        console.warn(`[mikrotik] ${path} proplist partial ${withProps.length}/${expected} — paginating`)
+        const paginated = await fetchPrintPages(api, path, proplist, expected)
+        if (paginated.length > withProps.length) return paginated
+        return dedupeRouterRows(withProps)
+      }
     } catch (error) {
       if (isUserManagerUnavailable(error)) return []
-      // try next proplist tier
     }
   }
 
   try {
-    const count = await printCount(api, path)
-    if (count > 0) {
-      console.warn(`[mikrotik] ${path} proplist returned 0/${count} — using full print`)
-      return await api.write(path)
+    if (expected > 0) {
+      console.warn(`[mikrotik] ${path} proplist returned 0/${expected} — using paginated print`)
+      for (const proplist of proplists) {
+        const paginated = await fetchPrintPages(api, path, proplist, expected)
+        if (paginated.length > 0) return paginated
+      }
+      return await fetchPrintPages(api, path, null, expected)
     }
-    return []
+    return dedupeRouterRows(await api.write(path))
   } catch (error) {
     if (isUserManagerUnavailable(error)) return []
     try {
-      console.warn(`[mikrotik] ${path} proplist failed (${error.message}) — using full print`)
-      return await api.write(path)
+      console.warn(`[mikrotik] ${path} proplist failed (${error.message}) — using paginated print`)
+      return await fetchPrintPages(api, path, proplists[0] || null, expected)
     } catch (fallbackError) {
       if (isUserManagerUnavailable(fallbackError)) return []
       throw fallbackError
@@ -1493,24 +1483,97 @@ async function buildRouterInventorySnapshot(api) {
   }
 }
 
-async function getCachedRouterInventory({ refresh = false } = {}) {
-  if (refresh) {
+async function refreshSnapshotSessionStatuses(api, snapshot) {
+  const [activeHotspotSessions, umSessionsRaw] = await Promise.all([
+    api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
+    api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
+  ])
+  const activeHotspotUsernames = new Set(
+    (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
+  )
+  const umSessions = umSessionsRaw || []
+  const activeUmUsernames = new Set(
+    umSessions.flatMap((s) => [s.user, s.username].filter(Boolean))
+  )
+
+  const cards = snapshot.cards.map((card) => {
+    if (card.source === ROUTER_SOURCE.USER_MANAGER) {
+      const row = {
+        name: card.name,
+        disabled: card.disabled,
+        uptime: card.uptime || '',
+        limitUptime: card.limitUptime || '',
+        bytesIn: card.bytesIn || 0,
+        bytesOut: card.bytesOut || 0,
+        lastSeen: card.lastSeen || '',
+      }
+      const { status, label } = resolveUserManagerCardStatus(row, activeUmUsernames)
+      const activeSession = umSessions.find((s) => (s.user || s.username) === card.name)
+      return finishInventoryCard(card, {
+        status,
+        statusLabel: label,
+        connectedIp: activeSession?.['ip-address'] || activeSession?.address || '',
+        sessionUptime: activeSession?.uptime || '',
+      })
+    }
+
+    const row = {
+      name: card.name,
+      disabled: card.disabled,
+      uptime: card.uptime || '',
+      bytesIn: card.bytesIn || 0,
+      bytesOut: card.bytesOut || 0,
+      lastSeen: card.lastSeen || '',
+    }
+    const { status, label } = resolveCardStatus(row, activeHotspotUsernames)
+    const activeSession = (activeHotspotSessions || []).find((s) => s.user === card.name)
+    return finishInventoryCard(card, {
+      status,
+      statusLabel: label,
+      connectedIp: activeSession?.address || '',
+      sessionUptime: activeSession?.uptime || '',
+    })
+  })
+
+  cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+  return {
+    ...snapshot,
+    cards,
+    summary: computeInventorySummary(cards),
+    fetchedAt: new Date().toISOString(),
+  }
+}
+
+async function getCachedRouterInventory({ refresh = false, filterOptions = {} } = {}) {
+  const cardFilters = normalizeInventoryCardFilters(filterOptions)
+  const lightConnectedRefresh = refresh && cardFilters.status === 'connected'
+
+  if (lightConnectedRefresh) {
+    const cached = routerInventoryCache
+    if (cached?.cards?.length) {
+      if (routerInventoryBuildPromise) return routerInventoryBuildPromise
+      routerInventoryBuildPromise = withInventoryConnection(async (api) => {
+        const updated = await refreshSnapshotSessionStatuses(api, cached)
+        routerInventoryCache = updated
+        routerInventoryCacheAt = Date.now()
+        return updated
+      }).finally(() => {
+        routerInventoryBuildPromise = null
+      })
+      return routerInventoryBuildPromise
+    }
+  }
+
+  if (refresh && !lightConnectedRefresh) {
     routerInventoryCache = null
     routerInventoryCacheAt = 0
     invalidateRouterEnrichmentIndex()
   }
 
   const now = Date.now()
-  if (!refresh && routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
-    return routerInventoryCache
-  }
-
   if (!refresh) {
-    const persisted = await loadPersistedRouterInventory()
-    if (persisted) {
-      routerInventoryCache = persisted
-      routerInventoryCacheAt = now
-      return persisted
+    if (routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
+      return routerInventoryCache
     }
     return null
   }
@@ -1520,10 +1583,9 @@ async function getCachedRouterInventory({ refresh = false } = {}) {
   }
 
   routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
-    .then(async (snapshot) => {
+    .then((snapshot) => {
       routerInventoryCache = snapshot
       routerInventoryCacheAt = Date.now()
-      await savePersistedRouterInventory(snapshot)
       return snapshot
     })
     .finally(() => {
@@ -1535,7 +1597,7 @@ async function getCachedRouterInventory({ refresh = false } = {}) {
 
 async function getFilteredRouterInventory(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
-  const snapshot = await getCachedRouterInventory({ refresh })
+  const snapshot = await getCachedRouterInventory({ refresh, filterOptions })
   if (!snapshot) {
     return { snapshot: null, filtered: [], cardFilters: normalizeInventoryCardFilters(filterOptions) }
   }
@@ -1544,12 +1606,12 @@ async function getFilteredRouterInventory(filterOptions = {}) {
   return { snapshot, filtered, cardFilters }
 }
 
-function routerInventorySummary(filtered, cap, snapshot, cardFilters) {
+function routerInventorySummary(filtered, snapshot, cardFilters) {
   const hasCardFilter = Boolean(cardFilters.status || cardFilters.source)
-  if (!hasCardFilter && snapshot.summary && filtered.length <= cap) {
+  if (!hasCardFilter && snapshot.summary && snapshot.cards.length === filtered.length) {
     return snapshot.summary
   }
-  return computeInventorySummary(filtered.slice(0, cap))
+  return computeInventorySummary(filtered)
 }
 
 async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = {} }) {
@@ -1571,18 +1633,18 @@ async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = 
       fetchedAt: new Date().toISOString(),
     }
   }
-  const cap = 10000
+  const cap = getInventoryMaxCap()
   const routerTotal = filtered.length
   const total = Math.min(routerTotal, cap)
   const truncated = routerTotal > cap
   const safeOffset = Math.max(0, Number(offset) || 0)
-  const safeLimit = Math.min(cap, Math.max(1, Number(limit) || cap))
+  const safeLimit = Math.min(cap, Math.max(1, Number(limit) || total || routerTotal))
   const slice = filtered.slice(safeOffset, safeOffset + safeLimit)
   const loaded = Math.min(safeOffset + slice.length, total)
 
   return {
     cards: slice,
-    summary: routerInventorySummary(filtered, cap, snapshot, cardFilters),
+    summary: routerInventorySummary(filtered, snapshot, cardFilters),
     period: filter.period,
     periodLabel: filter.periodLabel,
     truncated,
@@ -1601,11 +1663,12 @@ async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = 
   }
 }
 
-async function getPrintedCardsForPeriod(filterOptions = {}, { offset = 0, limit = 10000 } = {}) {
+async function getPrintedCardsForPeriod(filterOptions = {}, { offset = 0, limit } = {}) {
   const filter = resolveInventoryFilter(filterOptions)
   const { clause, params } = buildInventoryWhere(filter)
   const safeOffset = Math.max(0, Number(offset) || 0)
-  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 10000))
+  const maxCap = getInventoryMaxCap()
+  const safeLimit = Math.min(maxCap, Math.max(1, Number(limit) || maxCap))
   const { rows } = await query(
     `SELECT c.id AS cardId, c.code, c.status AS dbStatus, b.category_name AS categoryName,
             b.printed_at AS printedAt, b.router_source AS routerSource,
@@ -2025,9 +2088,10 @@ export async function getCombinedInventory(options = {}) {
     refresh: options.refresh,
   }
   const offset = Math.max(0, Number(options.offset) || 0)
+  const maxCap = getInventoryMaxCap()
   const limit = options.limit != null
-    ? Math.min(10000, Math.max(1, Number(options.limit) || 500))
-    : 10000
+    ? Math.min(maxCap, Math.max(1, Number(options.limit) || 500))
+    : maxCap
   const dbOnly = options.dbOnly === true || options.dbOnly === '1'
 
   const filter = resolveInventoryFilter(filterOptions)
@@ -2037,7 +2101,7 @@ export async function getCombinedInventory(options = {}) {
 
   const { rows: dbRows, truncated, total } = await getPrintedCardsForPeriod(
     filterOptions,
-    { offset, limit: limit > 10000 ? 10000 : limit }
+    { offset, limit }
   )
 
   const progressBase = {
@@ -2084,12 +2148,14 @@ export async function getCombinedInventory(options = {}) {
 
   try {
     const enriched = await enrichDbRowsWithRouterSafe(dbRows, { refresh: options.refresh })
-    const loaded = Math.min(offset + enriched.cards.length, total || offset + enriched.cards.length)
+    const cardFilters = normalizeInventoryCardFilters(filterOptions)
+    const cards = applyInventoryCardFilters(enriched.cards, cardFilters)
+    const loaded = Math.min(offset + cards.length, total || offset + cards.length)
     const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 100
 
     return {
-      cards: enriched.cards,
-      summary: computeInventorySummary(enriched.cards),
+      cards,
+      summary: computeInventorySummary(cards),
       period: filter.period,
       periodLabel: filter.periodLabel,
       truncated: Boolean(truncated),
