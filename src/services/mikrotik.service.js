@@ -10,6 +10,19 @@ import {
 } from '../constants/routerSource.js'
 import { formatDurationLabel, parseRosTime, parseTimeHms, parseValidityPeriod } from '../utils/duration.js'
 
+function parseDbJson(value, fallback = null) {
+  if (value == null || value === '') return fallback
+  if (typeof value === 'object') return value
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return fallback
+    }
+  }
+  return fallback
+}
+
 function getConnectionConfig() {
   let host = env.mikrotik.host.trim()
   let port = env.mikrotik.port
@@ -1271,15 +1284,23 @@ async function loadPersistedRouterInventory() {
     const row = rows[0]
     if (!row?.cardsBlob) return null
 
-    const cardsJson = gunzipSync(row.cardsBlob).toString('utf8')
+    const cardsBlob = row.cardsBlob
+    const cardsJson = Buffer.isBuffer(cardsBlob)
+      ? gunzipSync(cardsBlob).toString('utf8')
+      : gunzipSync(Buffer.from(cardsBlob)).toString('utf8')
     const cards = JSON.parse(cardsJson)
     if (!Array.isArray(cards) || !cards.length) return null
 
     return {
       cards,
-      summary: row.summaryJson ? JSON.parse(row.summaryJson) : computeInventorySummary(cards),
-      sources: row.sourcesJson ? JSON.parse(row.sourcesJson) : { hotspot: true, userManager: false },
-      userManager: row.userManagerJson ? JSON.parse(row.userManagerJson) : { available: false, customers: [], defaultCustomer: null, profiles: 0 },
+      summary: parseDbJson(row.summaryJson, computeInventorySummary(cards)),
+      sources: parseDbJson(row.sourcesJson, { hotspot: true, userManager: false }),
+      userManager: parseDbJson(row.userManagerJson, {
+        available: false,
+        customers: [],
+        defaultCustomer: null,
+        profiles: 0,
+      }),
       fetchedAt: row.fetchedAt ? new Date(row.fetchedAt).toISOString() : new Date().toISOString(),
       fromPersisted: true,
     }
@@ -1326,19 +1347,30 @@ const HS_USER_PROPS = [
 ]
 const UM_USER_PROPS = [
   '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,uptime-limit,password,comment,location,last-seen',
+  '=.proplist=name,username,profile,disabled,password,comment,location',
+  '=.proplist=name,username,profile,disabled',
 ]
 
-async function printWithProplistFallback(api, path, proplist) {
-  try {
-    const withProps = await api.write(path, [proplist])
-    if (Array.isArray(withProps) && withProps.length > 0) return withProps
+async function printWithProplistFallback(api, path, proplistOrList) {
+  const proplists = Array.isArray(proplistOrList) ? proplistOrList : [proplistOrList]
 
+  for (const proplist of proplists) {
+    try {
+      const withProps = await api.write(path, [proplist])
+      if (Array.isArray(withProps) && withProps.length > 0) return withProps
+    } catch (error) {
+      if (isUserManagerUnavailable(error)) return []
+      // try next proplist tier
+    }
+  }
+
+  try {
     const count = await printCount(api, path)
     if (count > 0) {
       console.warn(`[mikrotik] ${path} proplist returned 0/${count} — using full print`)
       return await api.write(path)
     }
-    return withProps || []
+    return []
   } catch (error) {
     if (isUserManagerUnavailable(error)) return []
     try {
@@ -1378,7 +1410,7 @@ async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
 
   const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
-    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0]).catch((error) => {
+    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
       if (isUserManagerUnavailable(error)) {
         userManagerAvailable = false
         return []
@@ -1412,7 +1444,7 @@ async function buildRouterInventorySnapshot(api) {
   const [hotspotUsersRaw, activeHotspotSessions, umUsersRaw, umSessionsRaw, umUserCount] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
-    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0]),
+    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     printCount(api, '/tool/user-manager/user/print').catch(() => 0),
   ])
@@ -1899,7 +1931,7 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
   }
 
   try {
-    const usersRaw = await printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS[0])
+    const usersRaw = await printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS)
     for (const u of usersRaw || []) {
       const name = u.username || u.name
       if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
