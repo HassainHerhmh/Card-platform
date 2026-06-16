@@ -23,4 +23,18 @@ router.get('/dashboard', async (_req, res) => {
   }
 })
 
+router.get('/comprehensive', async (req, res) => {
+  try {
+    const report = await reportsService.getComprehensivePrintReport({
+      period: req.query.period,
+      date: req.query.date,
+      month: req.query.month,
+      source: req.query.source,
+    })
+    res.json({ report })
+  } catch (error) {
+    res.status(500).json({ message: 'تعذر جلب التقرير الشامل' })
+  }
+})
+
 export default router
