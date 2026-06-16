@@ -7,6 +7,7 @@ import {
   getHotspotUsers,
   getCombinedInventory,
   getInventoryCount,
+  getRouterInventorySyncProgress,
   getUserManagerProfiles,
   getUserManagerCustomers,
   syncRouterCardsCount,
@@ -88,6 +89,15 @@ router.get('/profiles', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب بروفايلات الهوتسبوت' })
+  }
+})
+
+router.get('/inventory/sync-progress', async (_req, res) => {
+  try {
+    res.json(getRouterInventorySyncProgress())
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر جلب تقدّم المزامنة' })
   }
 })
 

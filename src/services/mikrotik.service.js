@@ -1272,8 +1272,69 @@ export async function getInventoryCount(filterOptions = {}) {
   const filter = resolveInventoryFilter(filterOptions)
   if (filter.type === 'all') {
     const cap = getInventoryMaxCap()
-    const snapshot = await getCachedRouterInventory({ refresh, filterOptions })
+    const cardFilters = normalizeInventoryCardFilters(filterOptions)
+
+    if (refresh && cardFilters.status === 'disabled') {
+      const snapshot = await getDisabledRouterInventorySnapshot(filterOptions, { refresh: true })
+      const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+      const routerTotal = filtered.length
+      return {
+        total: Math.min(routerTotal, cap),
+        dbTotal: 0,
+        routerTotal,
+        truncated: routerTotal > cap,
+        period: filter.period,
+        periodLabel: filter.periodLabel,
+        routerSource: true,
+        cached: true,
+        building: false,
+        needsRefresh: false,
+        fetchedAt: snapshot.fetchedAt,
+        fastFilter: true,
+      }
+    }
+
+    if (refresh) {
+      ensureRouterInventoryBuild()
+      const progress = getRouterInventorySyncProgress()
+      if (routerInventoryBuildPromise || progress.active) {
+        return {
+          total: progress.fetched || 0,
+          dbTotal: 0,
+          routerTotal: progress.total || 0,
+          truncated: false,
+          period: filter.period,
+          periodLabel: filter.periodLabel,
+          routerSource: true,
+          cached: false,
+          building: true,
+          needsRefresh: false,
+          progress,
+          fetchedAt: null,
+        }
+      }
+    }
+
+    const snapshot = await getCachedRouterInventory({ refresh: false, filterOptions })
     if (!snapshot?.cards?.length) {
+      if (cardFilters.status === 'disabled' && disabledRouterInventoryCache?.cards?.length) {
+        const filtered = applyInventoryCardFilters(disabledRouterInventoryCache.cards, cardFilters)
+        const routerTotal = filtered.length
+        return {
+          total: Math.min(routerTotal, cap),
+          dbTotal: 0,
+          routerTotal,
+          truncated: routerTotal > cap,
+          period: filter.period,
+          periodLabel: filter.periodLabel,
+          routerSource: true,
+          cached: true,
+          building: false,
+          needsRefresh: false,
+          fetchedAt: disabledRouterInventoryCache.fetchedAt,
+          fastFilter: true,
+        }
+      }
       return {
         total: 0,
         dbTotal: 0,
@@ -1283,12 +1344,12 @@ export async function getInventoryCount(filterOptions = {}) {
         periodLabel: filter.periodLabel,
         routerSource: true,
         cached: false,
+        building: false,
         needsRefresh: true,
         message: 'لا يوجد مخزون محفوظ — اضغط «تحديث» للمزامنة من الراوتر',
       }
     }
 
-    const cardFilters = normalizeInventoryCardFilters(filterOptions)
     const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
     const routerTotal = cardFilters.status || cardFilters.source ? filtered.length : snapshot.cards.length
     return {
@@ -1300,6 +1361,7 @@ export async function getInventoryCount(filterOptions = {}) {
       periodLabel: filter.periodLabel,
       routerSource: true,
       cached: true,
+      building: false,
       needsRefresh: false,
       fetchedAt: snapshot.fetchedAt,
     }
@@ -1310,7 +1372,56 @@ export async function getInventoryCount(filterOptions = {}) {
 let routerInventoryCache = null
 let routerInventoryCacheAt = 0
 let routerInventoryBuildPromise = null
+let routerInventoryBuildProgress = {
+  active: false,
+  phase: '',
+  fetched: 0,
+  total: 0,
+  percent: 0,
+}
+let disabledRouterInventoryCache = null
+let disabledRouterInventoryCacheAt = 0
 const ROUTER_INVENTORY_CACHE_MS = 24 * 60 * 60 * 1000
+const DISABLED_INVENTORY_CACHE_MS = 5 * 60 * 1000
+
+export function getRouterInventorySyncProgress() {
+  return { ...routerInventoryBuildProgress }
+}
+
+function resetRouterInventoryBuildProgress() {
+  routerInventoryBuildProgress = {
+    active: false,
+    phase: '',
+    fetched: 0,
+    total: 0,
+    percent: 0,
+  }
+}
+
+function setRouterInventoryBuildProgress(phase, fetched, total) {
+  const safeTotal = Math.max(0, Number(total) || 0)
+  const safeFetched = Math.max(0, Number(fetched) || 0)
+  routerInventoryBuildProgress = {
+    active: true,
+    phase,
+    fetched: safeFetched,
+    total: safeTotal,
+    percent: safeTotal > 0
+      ? Math.min(99, Math.round((safeFetched / safeTotal) * 100))
+      : 0,
+  }
+}
+
+function finishRouterInventoryBuildProgress(total) {
+  const safeTotal = Math.max(0, Number(total) || 0)
+  routerInventoryBuildProgress = {
+    active: false,
+    phase: 'done',
+    fetched: safeTotal,
+    total: safeTotal,
+    percent: 100,
+  }
+}
 
 let routerEnrichmentIndex = null
 let routerEnrichmentIndexAt = 0
@@ -1346,13 +1457,15 @@ function dedupeRouterRows(rows) {
   return out
 }
 
-async function fetchPrintPages(api, path, proplist, expected = 0) {
+async function fetchPrintPages(api, path, proplist, expected = 0, onProgress = null, extraArgs = []) {
   const all = []
   let cursor = ''
+  const staticQuery = (extraArgs || []).filter((a) => a.startsWith('?') && !a.startsWith('?#'))
 
   for (let page = 0; page < 200; page++) {
     const args = []
     if (proplist) args.push(proplist)
+    args.push(...staticQuery)
     if (cursor) args.push(`?#>.id=${cursor}`)
 
     let batch
@@ -1380,26 +1493,33 @@ async function fetchPrintPages(api, path, proplist, expected = 0) {
     if (batch.length < ROUTER_PRINT_PAGE_HINT) break
 
     cursor = lastId
+    if (onProgress) onProgress(all.length, expected || all.length)
   }
 
   const unique = dedupeRouterRows(all)
+  if (onProgress) onProgress(unique.length, expected || unique.length)
   if (expected > 0 && unique.length < expected) {
     console.warn(`[mikrotik] ${path} pagination got ${unique.length}/${expected}`)
   }
   return unique
 }
 
-async function printWithProplistFallback(api, path, proplistOrList) {
+async function printWithProplistFallback(api, path, proplistOrList, options = {}) {
+  const { extraArgs = [], onProgress = null } = options
   const proplists = Array.isArray(proplistOrList) ? proplistOrList : [proplistOrList]
-  const expected = await printCount(api, path).catch(() => 0)
+  const expected = await printCount(api, path, extraArgs).catch(() => 0)
 
   for (const proplist of proplists) {
     try {
-      const withProps = await api.write(path, [proplist])
+      const withProps = await api.write(path, [proplist, ...extraArgs])
       if (Array.isArray(withProps) && withProps.length > 0) {
-        if (!expected || withProps.length >= expected) return dedupeRouterRows(withProps)
+        if (!expected || withProps.length >= expected) {
+          const rows = dedupeRouterRows(withProps)
+          if (onProgress) onProgress(rows.length, expected || rows.length)
+          return rows
+        }
         console.warn(`[mikrotik] ${path} proplist partial ${withProps.length}/${expected} — paginating`)
-        const paginated = await fetchPrintPages(api, path, proplist, expected)
+        const paginated = await fetchPrintPages(api, path, proplist, expected, onProgress, extraArgs)
         if (paginated.length > withProps.length) return paginated
         return dedupeRouterRows(withProps)
       }
@@ -1412,17 +1532,19 @@ async function printWithProplistFallback(api, path, proplistOrList) {
     if (expected > 0) {
       console.warn(`[mikrotik] ${path} proplist returned 0/${expected} — using paginated print`)
       for (const proplist of proplists) {
-        const paginated = await fetchPrintPages(api, path, proplist, expected)
+        const paginated = await fetchPrintPages(api, path, proplist, expected, onProgress, extraArgs)
         if (paginated.length > 0) return paginated
       }
-      return await fetchPrintPages(api, path, null, expected)
+      return await fetchPrintPages(api, path, null, expected, onProgress, extraArgs)
     }
-    return dedupeRouterRows(await api.write(path))
+    const rows = dedupeRouterRows(await api.write(path, extraArgs))
+    if (onProgress) onProgress(rows.length, rows.length)
+    return rows
   } catch (error) {
     if (isUserManagerUnavailable(error)) return []
     try {
       console.warn(`[mikrotik] ${path} proplist failed (${error.message}) — using paginated print`)
-      return await fetchPrintPages(api, path, proplists[0] || null, expected)
+      return await fetchPrintPages(api, path, proplists[0] || null, expected, onProgress, extraArgs)
     } catch (fallbackError) {
       if (isUserManagerUnavailable(fallbackError)) return []
       throw fallbackError
@@ -1497,6 +1619,24 @@ async function getRouterEnrichmentIndex(api, { refresh = false } = {}) {
 }
 
 async function buildRouterInventorySnapshot(api) {
+  setRouterInventoryBuildProgress('counting', 0, 0)
+
+  const [hsCount, umCount] = await Promise.all([
+    printCount(api, '/ip/hotspot/user/print').catch(() => 0),
+    printCount(api, '/tool/user-manager/user/print').catch(() => 0),
+  ])
+  const totalExpected = (Number(hsCount) || 0) + (Number(umCount) || 0)
+  setRouterInventoryBuildProgress('hotspot', 0, totalExpected)
+
+  let fetchedSoFar = 0
+  const onHotspotProgress = (fetched) => {
+    fetchedSoFar = fetched
+    setRouterInventoryBuildProgress('hotspot', fetched, totalExpected)
+  }
+  const onUmProgress = (fetched) => {
+    setRouterInventoryBuildProgress('user-manager', fetchedSoFar + fetched, totalExpected)
+  }
+
   const [
     hotspotUsersRaw,
     activeHotspotSessions,
@@ -1506,14 +1646,16 @@ async function buildRouterInventorySnapshot(api) {
     hotspotProfilesRaw,
     umProfilesRaw,
   ] = await Promise.all([
-    printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]),
+    printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], { onProgress: onHotspotProgress }),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
-    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS),
+    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS, { onProgress: onUmProgress }),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     printCount(api, '/tool/user-manager/user/print').catch(() => 0),
     api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
     api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
   ])
+
+  setRouterInventoryBuildProgress('building', totalExpected, totalExpected)
 
   const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
   const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
@@ -1541,6 +1683,7 @@ async function buildRouterInventorySnapshot(api) {
   const cards = [...hotspotCards, ...umCards]
   cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
 
+  finishRouterInventoryBuildProgress(cards.length)
   console.info(`[mikrotik] router inventory snapshot: ${cards.length} cards (HS ${hotspotCards.length}, UM ${umCards.length})`)
 
   return {
@@ -1553,6 +1696,107 @@ async function buildRouterInventorySnapshot(api) {
     userManager: userManagerMeta,
     fetchedAt: new Date().toISOString(),
   }
+}
+
+async function buildDisabledRouterInventorySnapshot(api, filterOptions = {}) {
+  const cardFilters = normalizeInventoryCardFilters(filterOptions)
+  const sourceFilter = cardFilters.source
+  const disabledQuery = ['?disabled=yes']
+
+  const [
+    activeHotspotSessions,
+    umSessionsRaw,
+    hotspotProfilesRaw,
+    umProfilesRaw,
+    hotspotUsersRaw,
+    umUsersRaw,
+  ] = await Promise.all([
+    api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
+    api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
+    api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
+    api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
+    !sourceFilter || sourceFilter === ROUTER_SOURCE.HOTSPOT
+      ? printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], { extraArgs: disabledQuery })
+      : Promise.resolve([]),
+    !sourceFilter || sourceFilter === ROUTER_SOURCE.USER_MANAGER
+      ? printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS, { extraArgs: disabledQuery })
+      : Promise.resolve([]),
+  ])
+
+  const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
+  const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
+
+  const hotspotCards = (hotspotUsersRaw || []).map((u) => {
+    const row = mapHotspotUserRow(u)
+    return buildHotspotInventoryCard(row, hotspotProfileNames, activeHotspotSessions || [])
+  })
+
+  const umSessions = umSessionsRaw || []
+  const umCards = (umUsersRaw || []).map((u) => {
+    const row = mapUserManagerUserRow(u)
+    return buildUserManagerInventoryCard(row, umProfileNames, umSessions)
+  })
+
+  const cards = [...hotspotCards, ...umCards]
+  cards.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  return {
+    cards,
+    summary: computeInventorySummary(cards),
+    sources: {
+      hotspot: hotspotCards.length > 0,
+      userManager: umCards.length > 0,
+    },
+    userManager: {
+      available: umCards.length > 0,
+      customers: [],
+      defaultCustomer: null,
+      profiles: 0,
+      userCount: umCards.length,
+    },
+    fetchedAt: new Date().toISOString(),
+    filteredFetch: true,
+  }
+}
+
+async function getDisabledRouterInventorySnapshot(filterOptions = {}, { refresh = false } = {}) {
+  const now = Date.now()
+  if (!refresh && disabledRouterInventoryCache && now - disabledRouterInventoryCacheAt < DISABLED_INVENTORY_CACHE_MS) {
+    return disabledRouterInventoryCache
+  }
+  const snapshot = await withInventoryConnection((api) => buildDisabledRouterInventorySnapshot(api, filterOptions))
+  disabledRouterInventoryCache = snapshot
+  disabledRouterInventoryCacheAt = now
+  return snapshot
+}
+
+function ensureRouterInventoryBuild() {
+  if (routerInventoryBuildPromise) return routerInventoryBuildPromise
+
+  routerInventoryCache = null
+  routerInventoryCacheAt = 0
+  disabledRouterInventoryCache = null
+  disabledRouterInventoryCacheAt = 0
+  invalidateRouterEnrichmentIndex()
+  resetRouterInventoryBuildProgress()
+  setRouterInventoryBuildProgress('starting', 0, 0)
+
+  routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
+    .then((snapshot) => {
+      routerInventoryCache = snapshot
+      routerInventoryCacheAt = Date.now()
+      finishRouterInventoryBuildProgress(snapshot.cards.length)
+      return snapshot
+    })
+    .catch((error) => {
+      resetRouterInventoryBuildProgress()
+      throw error
+    })
+    .finally(() => {
+      routerInventoryBuildPromise = null
+    })
+
+  return routerInventoryBuildPromise
 }
 
 async function refreshSnapshotSessionStatuses(api, snapshot) {
@@ -1589,43 +1833,39 @@ async function refreshSnapshotSessionStatuses(api, snapshot) {
 
 async function getCachedRouterInventory({ refresh = false, filterOptions = {} } = {}) {
   if (refresh) {
-    routerInventoryCache = null
-    routerInventoryCacheAt = 0
-    invalidateRouterEnrichmentIndex()
+    if (routerInventoryBuildPromise) return routerInventoryBuildPromise
+    return ensureRouterInventoryBuild()
   }
 
   const now = Date.now()
-  if (!refresh) {
-    if (routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
-      return routerInventoryCache
-    }
-    return null
+  if (routerInventoryCache && now - routerInventoryCacheAt < ROUTER_INVENTORY_CACHE_MS) {
+    return routerInventoryCache
   }
-
-  if (routerInventoryBuildPromise) {
-    return routerInventoryBuildPromise
-  }
-
-  routerInventoryBuildPromise = withInventoryConnection((api) => buildRouterInventorySnapshot(api))
-    .then((snapshot) => {
-      routerInventoryCache = snapshot
-      routerInventoryCacheAt = Date.now()
-      return snapshot
-    })
-    .finally(() => {
-      routerInventoryBuildPromise = null
-    })
-
-  return routerInventoryBuildPromise
+  return null
 }
 
 async function getFilteredRouterInventory(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
-  const snapshot = await getCachedRouterInventory({ refresh, filterOptions })
-  if (!snapshot) {
-    return { snapshot: null, filtered: [], cardFilters: normalizeInventoryCardFilters(filterOptions) }
-  }
   const cardFilters = normalizeInventoryCardFilters(filterOptions)
+
+  if (refresh && cardFilters.status === 'disabled') {
+    const snapshot = await getDisabledRouterInventorySnapshot(filterOptions, { refresh: true })
+    const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
+    return { snapshot, filtered, cardFilters }
+  }
+
+  if (routerInventoryBuildPromise) {
+    await routerInventoryBuildPromise
+  }
+
+  const snapshot = await getCachedRouterInventory({ refresh: false, filterOptions })
+  if (!snapshot) {
+    if (cardFilters.status === 'disabled' && disabledRouterInventoryCache?.cards?.length) {
+      const filtered = applyInventoryCardFilters(disabledRouterInventoryCache.cards, cardFilters)
+      return { snapshot: disabledRouterInventoryCache, filtered, cardFilters }
+    }
+    return { snapshot: null, filtered: [], cardFilters }
+  }
   const filtered = applyInventoryCardFilters(snapshot.cards, cardFilters)
   return { snapshot, filtered, cardFilters }
 }
