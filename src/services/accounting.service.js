@@ -1,6 +1,26 @@
 import { query } from '../db/pool.js'
 import { formatDateTime } from '../utils/format.js'
 
+const DEFAULT_BRANCH_NAME = 'الفرع الرئيسي'
+
+function formatUserName(row) {
+  const name = row.user_name || row.created_by_name || row.created_by_username
+  return name && String(name).trim() ? String(name).trim() : null
+}
+
+function withBranchUser(row, { includeUser = true } = {}) {
+  const branch = row.branch_name || row.branch || DEFAULT_BRANCH_NAME
+  const next = {
+    ...row,
+    branch_name: branch,
+    branch,
+  }
+  if (includeUser) {
+    next.user_name = formatUserName(row) || '—'
+  }
+  return next
+}
+
 export async function ensureAccountingTables() {
   const statements = [
     `CREATE TABLE IF NOT EXISTS account_groups (
@@ -313,8 +333,8 @@ function mapAccount(row) {
     financial_statement: row.financial_statement,
     parent_name: row.parent_name || null,
     group_name: row.group_name || null,
-    created_by: row.created_by_name || row.created_by_username || null,
-    branch_name: row.branch_name || null,
+    created_by: formatUserName(row) || null,
+    branch_name: row.branch_name || DEFAULT_BRANCH_NAME,
     created_at: row.created_at ? formatDateTime(row.created_at) : null,
   }
 }
@@ -524,7 +544,7 @@ export async function listAccountGroups(search = '') {
         [like]
       )
     : await query('SELECT * FROM account_groups ORDER BY code')
-  return rows
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createAccountGroup(data) {
@@ -599,7 +619,7 @@ export async function listSimpleTypes(table, search = '') {
   const { rows } = search
     ? await query(`SELECT * FROM ${table} WHERE name_ar LIKE $1 ORDER BY sort_order, id`, [like])
     : await query(`SELECT * FROM ${table} ORDER BY sort_order, id`)
-  return rows
+  return rows.map((row) => withBranchUser(row, { includeUser: false }))
 }
 
 export async function createSimpleType(table, data) {
@@ -626,7 +646,7 @@ export async function listCashboxGroups(search = '') {
   const { rows } = search
     ? await query('SELECT * FROM cashbox_groups WHERE name_ar LIKE $1 ORDER BY code', [like])
     : await query('SELECT * FROM cashbox_groups ORDER BY code')
-  return rows
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createCashboxGroup(data) {
@@ -651,15 +671,17 @@ export async function deleteCashboxGroup(id) {
 export async function listCashBoxes(search = '') {
   const like = `%${search}%`
   const { rows } = await query(
-    `SELECT cb.*, cg.name_ar AS cashbox_group_name, aa.name_ar AS account_name
+    `SELECT cb.*, cg.name_ar AS cashbox_group_name, aa.name_ar AS account_name,
+            TRIM(CONCAT_WS(' ', NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.role), ''))) AS user_name
      FROM cash_boxes cb
      LEFT JOIN cashbox_groups cg ON cg.id = cb.cash_box_group_id
      LEFT JOIN accounting_accounts aa ON aa.id = cb.account_id
+     LEFT JOIN platform_users u ON u.id = cb.created_by
      ${search ? 'WHERE cb.name_ar LIKE $1 OR cb.code LIKE $1' : ''}
      ORDER BY cb.id DESC`,
     search ? [like] : []
   )
-  return rows.map((r) => ({ ...r, user_name: null, branch_name: null }))
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createCashBox(data) {
@@ -708,7 +730,7 @@ export async function listBankGroups(search = '') {
   const { rows } = search
     ? await query('SELECT * FROM bank_groups WHERE name_ar LIKE $1 ORDER BY code', [like])
     : await query('SELECT * FROM bank_groups ORDER BY code')
-  return rows
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createBankGroup(data) {
@@ -733,15 +755,17 @@ export async function deleteBankGroup(id) {
 export async function listBanks(search = '') {
   const like = `%${search}%`
   const { rows } = await query(
-    `SELECT b.*, bg.name_ar AS bank_group_name, aa.name_ar AS account_name
+    `SELECT b.*, bg.name_ar AS bank_group_name, aa.name_ar AS account_name,
+            TRIM(CONCAT_WS(' ', NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.role), ''))) AS user_name
      FROM banks b
      LEFT JOIN bank_groups bg ON bg.id = b.bank_group_id
      LEFT JOIN accounting_accounts aa ON aa.id = b.account_id
+     LEFT JOIN platform_users u ON u.id = b.created_by
      ${search ? 'WHERE b.name_ar LIKE $1 OR b.code LIKE $1' : ''}
      ORDER BY b.id DESC`,
     search ? [like] : []
   )
-  return rows.map((r) => ({ ...r, user_name: null, branch_name: null }))
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createBank(data) {
@@ -812,7 +836,7 @@ export async function listReceiptVouchers() {
      LEFT JOIN platform_users u ON u.id = rv.created_by
      ORDER BY rv.id DESC`
   )
-  return rows.map((r) => ({ ...r, branch_name: null }))
+  return rows.map((row) => withBranchUser(row))
 }
 
 export async function createReceiptVoucher(data) {
@@ -875,7 +899,7 @@ export async function listPaymentVouchers() {
      LEFT JOIN platform_users u ON u.id = pv.created_by
      ORDER BY pv.id DESC`
   )
-  return rows.map((r) => ({ ...r, branch_name: null, paymentTypeName: null }))
+  return rows.map((row) => withBranchUser({ ...row, paymentTypeName: row.paymentTypeName ?? null }))
 }
 
 export async function createPaymentVoucher(data) {
@@ -942,7 +966,7 @@ export async function listJournalEntriesGrouped() {
      GROUP BY je.reference_id, je.reference_type, je.journal_date
      ORDER BY je.journal_date DESC, je.reference_id DESC`
   )
-  return rows.map((r, idx) => ({
+  return rows.map((r, idx) => withBranchUser({
     id: idx + 1,
     reference_id: r.reference_id,
     reference_type: r.reference_type,
@@ -952,8 +976,6 @@ export async function listJournalEntriesGrouped() {
     from_account: r.from_account || '',
     to_account: r.to_account || '',
     notes: r.notes || '',
-    user_name: '—',
-    branch_name: '—',
   }))
 }
 
@@ -985,12 +1007,11 @@ export async function listAccountCeilings() {
      LEFT JOIN currencies c ON c.id = ac.currency_id
      ORDER BY ac.id DESC`
   )
-  return rows.map((r) => ({
-    ...r,
-    account_type: r.account_nature,
-    limit_action: r.exceed_action,
-    branch_name: null,
-  }))
+  return rows.map((row) => withBranchUser({
+    ...row,
+    account_type: row.account_nature,
+    limit_action: row.exceed_action,
+  }, { includeUser: false }))
 }
 
 export async function createAccountCeiling(data) {

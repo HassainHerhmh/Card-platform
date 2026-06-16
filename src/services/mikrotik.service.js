@@ -1073,6 +1073,49 @@ function normalizeInventoryPeriod(period) {
 function resolveInventoryFilter(options = {}) {
   const date = String(options.date || '').trim()
   const month = String(options.month || '').trim()
+  const period = normalizeInventoryPeriod(options.period || 'day')
+
+  if (period === 'all') {
+    return { type: 'all', period, periodLabel: 'كل الكروت' }
+  }
+
+  if (period === 'month') {
+    const m = /^\d{4}-\d{2}$/.test(month) ? month : date.slice(0, 7)
+    if (/^\d{4}-\d{2}$/.test(m)) {
+      const [year, monthNum] = m.split('-')
+      return {
+        type: 'monthPick',
+        year,
+        month: monthNum,
+        period: 'monthPick',
+        periodLabel: `شهر ${monthNum}/${year}`,
+      }
+    }
+  }
+
+  if (period === 'week' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    const [y, m, d] = date.split('-').map(Number)
+    const ref = new Date(y, m - 1, d)
+    const fromDate = new Date(ref)
+    fromDate.setDate(ref.getDate() - 6)
+    const from = `${fromDate.getFullYear()}-${String(fromDate.getMonth() + 1).padStart(2, '0')}-${String(fromDate.getDate()).padStart(2, '0')}`
+    return {
+      type: 'range',
+      from,
+      to: date,
+      period: 'week',
+      periodLabel: `أسبوع حتى ${date}`,
+    }
+  }
+
+  if (period === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return {
+      type: 'date',
+      date,
+      period: 'date',
+      periodLabel: `يوم ${date}`,
+    }
+  }
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return {
@@ -1094,11 +1137,6 @@ function resolveInventoryFilter(options = {}) {
     }
   }
 
-  const period = normalizeInventoryPeriod(options.period || 'day')
-  if (period === 'all') {
-    return { type: 'all', period, periodLabel: 'كل الكروت' }
-  }
-
   return { type: 'preset', period, periodLabel: periodLabelAr(period) }
 }
 
@@ -1108,6 +1146,8 @@ function buildInventoryWhere(filter) {
       return { clause: 'DATE(b.printed_at) = ?', params: [filter.date] }
     case 'monthPick':
       return { clause: 'YEAR(b.printed_at) = ? AND MONTH(b.printed_at) = ?', params: [filter.year, filter.month] }
+    case 'range':
+      return { clause: 'DATE(b.printed_at) >= ? AND DATE(b.printed_at) <= ?', params: [filter.from, filter.to] }
     case 'all':
       return { clause: '1=1', params: [] }
     default:
@@ -1472,8 +1512,16 @@ async function getFilteredRouterInventory(filterOptions = {}) {
   return { snapshot, filtered, cardFilters }
 }
 
+function routerInventorySummary(filtered, cap, snapshot, cardFilters) {
+  const hasCardFilter = Boolean(cardFilters.status || cardFilters.source)
+  if (!hasCardFilter && snapshot.summary && filtered.length <= cap) {
+    return snapshot.summary
+  }
+  return computeInventorySummary(filtered.slice(0, cap))
+}
+
 async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = {} }) {
-  const { filtered, snapshot } = await getFilteredRouterInventory(filterOptions)
+  const { filtered, snapshot, cardFilters } = await getFilteredRouterInventory(filterOptions)
   if (!snapshot) {
     return {
       cards: [],
@@ -1496,13 +1544,13 @@ async function getRouterInventoryChunk({ filter, offset, limit, filterOptions = 
   const total = Math.min(routerTotal, cap)
   const truncated = routerTotal > cap
   const safeOffset = Math.max(0, Number(offset) || 0)
-  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50))
+  const safeLimit = Math.min(cap, Math.max(1, Number(limit) || cap))
   const slice = filtered.slice(safeOffset, safeOffset + safeLimit)
   const loaded = Math.min(safeOffset + slice.length, total)
 
   return {
     cards: slice,
-    summary: computeInventorySummary(filtered.slice(0, cap)),
+    summary: routerInventorySummary(filtered, cap, snapshot, cardFilters),
     period: filter.period,
     periodLabel: filter.periodLabel,
     truncated,
@@ -1945,7 +1993,9 @@ export async function getCombinedInventory(options = {}) {
     refresh: options.refresh,
   }
   const offset = Math.max(0, Number(options.offset) || 0)
-  const limit = options.limit != null ? Math.min(500, Math.max(1, Number(options.limit) || 50)) : 10000
+  const limit = options.limit != null
+    ? Math.min(10000, Math.max(1, Number(options.limit) || 500))
+    : 10000
   const dbOnly = options.dbOnly === true || options.dbOnly === '1'
 
   const filter = resolveInventoryFilter(filterOptions)
