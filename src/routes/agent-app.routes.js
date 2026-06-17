@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { requireAgentAuth } from '../middleware/agentAuth.js'
 import * as agentAppService from '../services/agent-app.service.js'
+import * as agentNotebookService from '../services/agent-notebook.service.js'
 import * as smsGatewayService from '../services/sms-gateway.service.js'
 
 const router = Router()
@@ -103,6 +104,56 @@ router.post('/charge', async (req, res) => {
   } catch (error) {
     console.error(error)
     res.status(400).json({ message: error.message || 'تعذر تنفيذ الشحن' })
+  }
+})
+
+router.get('/notebook', async (req, res) => {
+  try {
+    const notebook = await agentNotebookService.getAgentNotebook(req.agent.id)
+    res.json({
+      payload: notebook.payload,
+      updatedAt: notebook.updatedAt,
+      exists: notebook.exists,
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب دفتر الحسابات' })
+  }
+})
+
+router.put('/notebook', async (req, res) => {
+  try {
+    const saved = await agentNotebookService.saveAgentNotebook(req.agent.id, req.body?.payload)
+    res.json({
+      payload: saved.payload,
+      updatedAt: saved.updatedAt,
+    })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ message: error.message || 'تعذر حفظ دفتر الحسابات' })
+  }
+})
+
+router.post('/notebook/sync', async (req, res) => {
+  try {
+    const result = await agentNotebookService.syncAgentNotebook(req.agent.id, {
+      localPayload: req.body?.payload,
+      localUpdatedAt: req.body?.localUpdatedAt,
+    })
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: error.message || 'تعذر مزامنة دفتر الحسابات' })
+  }
+})
+
+router.post('/notebook/restore', async (req, res) => {
+  try {
+    const result = await agentNotebookService.restoreAgentNotebook(req.agent.id)
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: error.message || 'تعذر استعادة دفتر الحسابات' })
   }
 })
 

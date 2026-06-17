@@ -48,6 +48,12 @@ export async function migrate() {
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )`,
     'ALTER TABLE print_templates ADD COLUMN category_id INT NULL',
+    `CREATE TABLE IF NOT EXISTS agent_notebook_data (
+      agent_id INT PRIMARY KEY,
+      payload JSON NOT NULL,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    )`,
   ]
 
   for (const patch of patches) {
