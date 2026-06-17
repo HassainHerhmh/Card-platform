@@ -7,6 +7,72 @@ export const DEFAULT_NOTEBOOK = {
   vouchers: [],
 }
 
+function createId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function normalizeCategory(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const name = String(raw.name || '').trim()
+  if (!name) return null
+  return {
+    id: String(raw.id || '').trim() || createId('cat'),
+    name,
+  }
+}
+
+function normalizeAccount(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const name = String(raw.name || '').trim()
+  const categoryId = String(raw.categoryId || '').trim()
+  if (!name || !categoryId) return null
+  return {
+    id: String(raw.id || '').trim() || createId('acc'),
+    categoryId,
+    name,
+    phone: String(raw.phone || '').trim(),
+    notes: String(raw.notes || '').trim(),
+    ceiling: Math.max(0, Number(raw.ceiling) || 0),
+  }
+}
+
+function normalizeVoucher(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const accountId = String(raw.accountId || '').trim()
+  const type = raw.type === 'payment' ? 'payment' : raw.type === 'receipt' ? 'receipt' : ''
+  const amount = Number(raw.amount)
+  if (!accountId || !type || !Number.isFinite(amount) || amount <= 0) return null
+  return {
+    id: String(raw.id || '').trim() || createId('v'),
+    accountId,
+    type,
+    amount,
+    note: String(raw.note || '').trim(),
+    date: String(raw.date || '').slice(0, 10) || new Date().toISOString().slice(0, 10),
+  }
+}
+
+function normalizeNotebook(data) {
+  const categories = (Array.isArray(data?.categories) ? data.categories : [])
+    .map(normalizeCategory)
+    .filter(Boolean)
+
+  const accounts = (Array.isArray(data?.accounts) ? data.accounts : [])
+    .map(normalizeAccount)
+    .filter(Boolean)
+
+  const vouchers = (Array.isArray(data?.vouchers) ? data.vouchers : [])
+    .map(normalizeVoucher)
+    .filter(Boolean)
+
+  return {
+    version: 1,
+    categories: categories.length ? categories : [...DEFAULT_NOTEBOOK.categories],
+    accounts,
+    vouchers,
+  }
+}
+
 function parsePayload(raw) {
   if (!raw) return { ...DEFAULT_NOTEBOOK, categories: [...DEFAULT_NOTEBOOK.categories] }
   if (typeof raw === 'object') return normalizeNotebook(raw)
@@ -14,17 +80,6 @@ function parsePayload(raw) {
     return normalizeNotebook(JSON.parse(raw))
   } catch {
     return { ...DEFAULT_NOTEBOOK, categories: [...DEFAULT_NOTEBOOK.categories] }
-  }
-}
-
-function normalizeNotebook(data) {
-  return {
-    version: 1,
-    categories: Array.isArray(data.categories) && data.categories.length
-      ? data.categories
-      : [...DEFAULT_NOTEBOOK.categories],
-    accounts: Array.isArray(data.accounts) ? data.accounts : [],
-    vouchers: Array.isArray(data.vouchers) ? data.vouchers : [],
   }
 }
 
