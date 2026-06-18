@@ -38,17 +38,41 @@ function normalizeAccount(raw) {
 
 function normalizeVoucher(raw) {
   if (!raw || typeof raw !== 'object') return null
+  const amount = Number(raw.amount)
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const currency = ['usd', 'sar', 'yer'].includes(raw.currency) ? raw.currency : 'yer'
+  const date = String(raw.date || '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+  const note = String(raw.note || '').trim()
+  const id = String(raw.id || '').trim() || createId('v')
+
+  if (raw.kind === 'transfer') {
+    const fromAccountId = String(raw.fromAccountId || '').trim()
+    const toAccountId = String(raw.toAccountId || '').trim()
+    if (!fromAccountId || !toAccountId || fromAccountId === toAccountId) return null
+    return {
+      id,
+      kind: 'transfer',
+      fromAccountId,
+      toAccountId,
+      amount,
+      note,
+      date,
+      currency,
+    }
+  }
+
   const accountId = String(raw.accountId || '').trim()
   const type = raw.type === 'payment' ? 'payment' : raw.type === 'receipt' ? 'receipt' : ''
-  const amount = Number(raw.amount)
-  if (!accountId || !type || !Number.isFinite(amount) || amount <= 0) return null
+  if (!accountId || !type) return null
   return {
-    id: String(raw.id || '').trim() || createId('v'),
+    id,
+    kind: 'voucher',
     accountId,
     type,
     amount,
-    note: String(raw.note || '').trim(),
-    date: String(raw.date || '').slice(0, 10) || new Date().toISOString().slice(0, 10),
+    note,
+    date,
+    currency,
   }
 }
 
