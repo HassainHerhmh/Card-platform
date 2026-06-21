@@ -226,14 +226,17 @@ async function countConnectedNeighbors(api) {
   return 0
 }
 
-async function fetchUserManagerStatusLite(api) {
+async function fetchUserManagerStatusLite(api, options = {}) {
+  const fast = options.fast === true
   try {
     const [userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, umProfiles, customersRaw] = await Promise.all([
       printCount(api, '/tool/user-manager/user/print'),
       printCount(api, '/tool/user-manager/session/print'),
       countActiveUserManagerSessions(api),
       printCount(api, '/tool/user-manager/profile/print'),
-      api.write('/tool/user-manager/customer/print').catch(() => []),
+      fast
+        ? Promise.resolve([])
+        : api.write('/tool/user-manager/customer/print').catch(() => []),
     ])
 
     const customers = (customersRaw || []).map(mapUserManagerCustomerRow)
@@ -278,7 +281,8 @@ export async function syncRouterCardsCount(liveCount) {
   return { count: liveCount, synced: true }
 }
 
-export async function fetchRouterStatusFull() {
+export async function fetchRouterStatusFull(options = {}) {
+  const fast = options.fast === true
   const cfg = getConnectionConfig()
   if (!cfg.host || !cfg.user || !cfg.password) {
     return {
@@ -298,8 +302,8 @@ export async function fetchRouterStatusFull() {
     const [hotspotUsers, activeHotspotUsers, umLite, neighborCount] = await Promise.all([
       printCount(api, '/ip/hotspot/user/print'),
       printCount(api, '/ip/hotspot/active/print'),
-      fetchUserManagerStatusLite(api),
-      countConnectedNeighbors(api),
+      fetchUserManagerStatusLite(api, { fast }),
+      fast ? Promise.resolve(0) : countConnectedNeighbors(api),
     ])
 
     const { userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, userManager } = umLite
@@ -335,7 +339,11 @@ export async function fetchRouterStatusFull() {
 
 let routerStatusCache = null
 let routerStatusCacheAt = 0
+let activeUsersWarmCache = null
+let activeUsersWarmCacheAt = 0
+let backgroundWarmPromise = null
 const ROUTER_STATUS_CACHE_MS = 6 * 60 * 60 * 1000
+const ACTIVE_USERS_WARM_CACHE_MS = 6 * 60 * 60 * 1000
 
 function setRouterStatusCache(status) {
   if (!status?.connected) return
@@ -352,49 +360,114 @@ export function getCachedRouterStatus() {
 export function clearMikrotikWarmCache() {
   routerStatusCache = null
   routerStatusCacheAt = 0
+  activeUsersWarmCache = null
+  activeUsersWarmCacheAt = 0
   routerInventoryCache = null
   routerInventoryCacheAt = 0
   disabledRouterInventoryCache = null
   disabledRouterInventoryCacheAt = 0
   routerInventoryBuildPromise = null
+  backgroundWarmPromise = null
   resetRouterInventoryBuildProgress()
 }
 
-export async function warmMikrotikData() {
-  console.info('[mikrotik] warm: start')
+function setActiveUsersWarmCache(data) {
+  if (!data) return
+  activeUsersWarmCache = data
+  activeUsersWarmCacheAt = Date.now()
+}
 
-  const status = await fetchRouterStatusFull().catch((error) => {
-    console.error('[mikrotik] warm: status failed', error.message)
-    throw error
+function tryActiveUsersWarmCache(sourceFilter) {
+  if (!activeUsersWarmCache) return null
+  if (Date.now() - activeUsersWarmCacheAt > ACTIVE_USERS_WARM_CACHE_MS) return null
+
+  const users = sourceFilter === 'all'
+    ? activeUsersWarmCache.users
+    : (activeUsersWarmCache.users || []).filter((row) => row.source === sourceFilter)
+
+  if (!users?.length) return null
+
+  return {
+    users,
+    count: users.length,
+    summary: {
+      total: users.length,
+      hotspot: users.filter((r) => r.source === ROUTER_SOURCE.HOTSPOT).length,
+      userManager: users.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
+    },
+    fetchedAt: activeUsersWarmCache.fetchedAt || new Date().toISOString(),
+    cached: true,
+    warmCache: true,
+  }
+}
+
+function scheduleBackgroundMikrotikWarm() {
+  if (backgroundWarmPromise) return backgroundWarmPromise
+
+  backgroundWarmPromise = (async () => {
+    console.info('[mikrotik] background warm: start')
+    try {
+      await syncAllFromRouter()
+    } catch (error) {
+      console.warn('[mikrotik] background warm: sync skipped', error.message)
+    }
+    try {
+      await ensureRouterInventoryBuild()
+      console.info('[mikrotik] background warm: inventory done')
+    } catch (error) {
+      console.warn('[mikrotik] background warm: inventory failed', error.message)
+    }
+  })().finally(() => {
+    backgroundWarmPromise = null
   })
-  setRouterStatusCache(status)
 
-  const [syncResult, inventory] = await Promise.all([
-    syncAllFromRouter().catch((error) => {
-      console.warn('[mikrotik] warm: sync skipped', error.message)
-      return null
-    }),
-    ensureRouterInventoryBuild().catch((error) => {
-      console.warn('[mikrotik] warm: inventory failed', error.message)
+  return backgroundWarmPromise
+}
+
+export function getMikrotikWarmState() {
+  return {
+    statusReady: Boolean(routerStatusCache),
+    activeUsersReady: Boolean(activeUsersWarmCache?.users?.length),
+    activeUsersCount: activeUsersWarmCache?.count || activeUsersWarmCache?.users?.length || 0,
+    inventoryReady: Boolean(routerInventoryCache?.cards?.length),
+    inventoryBuilding: Boolean(routerInventoryBuildPromise || backgroundWarmPromise),
+    inventoryProgress: getRouterInventorySyncProgress(),
+  }
+}
+
+export async function warmMikrotikData() {
+  console.info('[mikrotik] warm: fast start')
+
+  const [status, activeUsers] = await Promise.all([
+    fetchRouterStatusFull({ fast: true }).catch((error) => {
+      console.error('[mikrotik] warm: status failed', error.message)
       throw error
+    }),
+    getActiveUsers({ refresh: true, source: 'all', fast: true }).catch((error) => {
+      console.warn('[mikrotik] warm: active-users failed', error.message)
+      return {
+        users: [],
+        count: 0,
+        summary: { total: 0, hotspot: 0, userManager: 0 },
+        fetchedAt: new Date().toISOString(),
+      }
     }),
   ])
 
-  let activeUsers = { count: 0, summary: { total: 0, hotspot: 0, userManager: 0 } }
-  try {
-    activeUsers = await getActiveUsers({ refresh: false, source: 'all' })
-  } catch (error) {
-    console.warn('[mikrotik] warm: active-users cache read failed', error.message)
+  setRouterStatusCache(status)
+  if (activeUsers?.users?.length) {
+    setActiveUsersWarmCache(activeUsers)
   }
 
-  console.info(`[mikrotik] warm: done — inventory ${inventory?.cards?.length || 0}, active ${activeUsers.count || 0}`)
+  scheduleBackgroundMikrotikWarm()
+
+  console.info(`[mikrotik] warm: fast done — active ${activeUsers.count || 0}, inventory in background`)
 
   return {
     status: getCachedRouterStatus() || status,
-    inventoryCards: inventory?.cards?.length || routerInventoryCache?.cards?.length || 0,
     activeUsers: activeUsers.count || 0,
     activeSummary: activeUsers.summary || null,
-    categoriesSynced: syncResult?.categories?.synced ?? null,
+    inventoryBackground: true,
     warmedAt: new Date().toISOString(),
   }
 }
@@ -1789,10 +1862,12 @@ async function routerWriteWithTimeout(api, path, args, timeoutMs = ACTIVE_USERS_
   ])
 }
 
-async function fetchActiveUserCandidates(api, path, proplist, queryVariants) {
-  for (const queryArgs of queryVariants) {
+async function fetchActiveUserCandidates(api, path, proplist, queryVariants, options = {}) {
+  const variants = options.fast ? queryVariants.slice(0, 1) : queryVariants
+  const timeoutMs = options.fast ? 15000 : ACTIVE_USERS_QUERY_TIMEOUT_MS
+  for (const queryArgs of variants) {
     try {
-      const rows = await routerWriteWithTimeout(api, path, [proplist, ...queryArgs])
+      const rows = await routerWriteWithTimeout(api, path, [proplist, ...queryArgs], timeoutMs)
       if (!Array.isArray(rows) || rows.length === 0) continue
       if (rows.length > ACTIVE_USERS_MAX_UNFILTERED) {
         console.warn(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} returned ${rows.length} — filter ignored`)
@@ -1839,8 +1914,8 @@ async function fetchRouterUsersByNames(api, path, proplist, names) {
   return dedupeRouterRows(rows)
 }
 
-async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sessionNames = []) {
-  const fromQuery = await fetchActiveUserCandidates(api, path, proplist, queryVariants)
+async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sessionNames = [], options = {}) {
+  const fromQuery = await fetchActiveUserCandidates(api, path, proplist, queryVariants, options)
   if (fromQuery.length > 0) return fromQuery
 
   if (sessionNames.length > 0) {
@@ -1850,6 +1925,14 @@ async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sess
   }
 
   return []
+}
+
+function filterOpenUmSessions(rows) {
+  return (rows || []).filter((row) => {
+    if (row.active === 'false' || row.active === false) return false
+    if (row.ended === 'true' || row.ended === true) return false
+    return Boolean(row.user || row.username)
+  })
 }
 
 function buildLightUmProfileLimits(profilesRaw) {
@@ -3125,8 +3208,12 @@ export async function getActiveUsers(options = {}) {
   const includeHotspot = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.HOTSPOT
   const includeUserManager = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.USER_MANAGER
   const refresh = options.refresh === true || options.refresh === '1'
+  const fast = options.fast === true
 
   if (!refresh) {
+    const warmCached = tryActiveUsersWarmCache(sourceFilter)
+    if (warmCached) return warmCached
+
     const cached = tryActiveUsersFromInventoryCache(sourceFilter)
     if (cached) return cached
     try {
@@ -3150,6 +3237,7 @@ export async function getActiveUsers(options = {}) {
   }
 
   return withConnection(async (api) => {
+    const queryTimeout = fast ? 15000 : ACTIVE_USERS_QUERY_TIMEOUT_MS
     const [
       activeHotspotSessions,
       umSessionsActive,
@@ -3158,42 +3246,46 @@ export async function getActiveUsers(options = {}) {
       umProfilesRaw,
     ] = await Promise.all([
       includeHotspot
-        ? routerWriteWithTimeout(api, '/ip/hotspot/active/print', [HS_ACTIVE_SESSION_PROPS]).catch(() => [])
+        ? routerWriteWithTimeout(api, '/ip/hotspot/active/print', [HS_ACTIVE_SESSION_PROPS], queryTimeout).catch(() => [])
         : Promise.resolve([]),
-      includeUserManager
+      includeUserManager && !fast
         ? routerWriteWithTimeout(api, '/tool/user-manager/session/print', [
           '?active=yes',
           UM_ACTIVE_SESSION_PROPS,
-        ]).catch(() => [])
+        ], queryTimeout).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
         ? routerWriteWithTimeout(api, '/tool/user-manager/session/print', [
-          '?ended=no',
+          ...(fast ? [] : ['?ended=no']),
           UM_ACTIVE_SESSION_PROPS,
-        ]).catch(() => [])
+        ], queryTimeout).catch(() => [])
         : Promise.resolve([]),
-      includeHotspot
-        ? routerWriteWithTimeout(api, '/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
+      includeHotspot && !fast
+        ? routerWriteWithTimeout(api, '/ip/hotspot/user/profile/print', ['=.proplist=name'], queryTimeout).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
         ? routerWriteWithTimeout(
           api,
           '/tool/user-manager/profile/print',
-          ['=.proplist=name,uptime-limit,download-limit,upload-limit,transfer-limit'],
+          [fast ? '=.proplist=name' : '=.proplist=name,uptime-limit,download-limit,upload-limit,transfer-limit'],
+          queryTimeout,
         ).catch(() => [])
         : Promise.resolve([]),
     ])
 
-    const umSessionsMerged = dedupeRouterRows([
-      ...(umSessionsActive || []),
-      ...(umSessionsOpen || []),
-    ])
+    const umSessionsMerged = fast
+      ? dedupeRouterRows(filterOpenUmSessions(umSessionsOpen))
+      : dedupeRouterRows([
+        ...(umSessionsActive || []),
+        ...(umSessionsOpen || []),
+      ])
     const hsSessionIndex = buildSessionIndex(activeHotspotSessions)
     const umSessionIndex = buildSessionIndex(umSessionsMerged)
 
     const hsSessionNames = [...hsSessionIndex.keys()]
     const umSessionNames = [...umSessionIndex.keys()]
 
+    const fetchOpts = { fast }
     const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
       includeHotspot
         ? fetchInUseRouterUserRows(
@@ -3201,7 +3293,8 @@ export async function getActiveUsers(options = {}) {
           '/ip/hotspot/user/print',
           HS_USER_PROPS[0],
           HS_ACTIVE_USER_QUERIES,
-          hsSessionNames
+          hsSessionNames,
+          fetchOpts,
         )
         : Promise.resolve([]),
       includeUserManager
@@ -3210,7 +3303,8 @@ export async function getActiveUsers(options = {}) {
           '/tool/user-manager/user/print',
           UM_USER_PROPS[0],
           UM_ACTIVE_USER_QUERIES,
-          umSessionNames
+          umSessionNames,
+          fetchOpts,
         ).catch((error) => {
           if (isUserManagerUnavailable(error)) return []
           throw error
@@ -3221,7 +3315,7 @@ export async function getActiveUsers(options = {}) {
     const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
     const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
     let umProfileLimits = buildLightUmProfileLimits(umProfilesRaw)
-    if ((umUsersRaw?.length || 0) > 0 && (umUsersRaw?.length || 0) <= 200) {
+    if (!fast && (umUsersRaw?.length || 0) > 0 && (umUsersRaw?.length || 0) <= 200) {
       const limitsByProfile = await fetchUserManagerLimitationData(api, umProfilesRaw).catch(() => ({}))
       umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
     }
@@ -3270,7 +3364,7 @@ export async function getActiveUsers(options = {}) {
       }
     }
 
-    return {
+    const result = {
       users: rows,
       count: rows.length,
       summary: {
@@ -3281,7 +3375,11 @@ export async function getActiveUsers(options = {}) {
       fetchedAt: new Date().toISOString(),
       cached: false,
     }
-  }, { operationTimeoutSec: 90 })
+    if (rows.length > 0) {
+      setActiveUsersWarmCache(result)
+    }
+    return result
+  }, { operationTimeoutSec: fast ? 50 : 90 })
 }
 
 export async function getCombinedInventory(options = {}) {

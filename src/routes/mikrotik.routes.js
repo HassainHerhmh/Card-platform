@@ -21,10 +21,20 @@ import {
   getActiveUsers,
   warmMikrotikData,
   clearMikrotikWarmCache,
+  getMikrotikWarmState,
 } from '../services/mikrotik.service.js'
 
 const router = Router()
 router.use(requireAuth)
+
+router.get('/connection/warm-state', async (_req, res) => {
+  try {
+    res.json(getMikrotikWarmState())
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب حالة التحميل' })
+  }
+})
 
 router.post('/connection/warm', async (_req, res) => {
   try {
