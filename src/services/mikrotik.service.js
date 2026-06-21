@@ -1151,6 +1151,45 @@ function sessionMac(session) {
   return session?.['mac-address'] || session?.['calling-station-id'] || ''
 }
 
+function sessionDeviceName(session) {
+  return session?.['host-name'] || session?.hostname || session?.['client-id'] || ''
+}
+
+function sessionServerName(session) {
+  return session?.server || session?.['nas-port-id'] || session?.interface || ''
+}
+
+function buildSessionIndex(sessions) {
+  const byUser = new Map()
+  for (const session of sessions || []) {
+    const name = session?.user || session?.username
+    if (!name) continue
+    const key = String(name)
+    const active = session.active === true || session.active === 'true' || session.active === 'yes'
+    const existing = byUser.get(key)
+    if (!existing || active) byUser.set(key, session)
+  }
+  return byUser
+}
+
+function hasRouterUsage(user) {
+  const usedSec = parseUsageSeconds(user?.uptime)
+  const bytesIn = Number(user?.bytesIn || 0)
+  const bytesOut = Number(user?.bytesOut || 0)
+  return usedSec > 0 || bytesIn > 0 || bytesOut > 0
+}
+
+function shouldIncludeActiveUser(user, statusResult, source) {
+  if (user?.disabled) return false
+  if (statusResult.status === 'disabled' || statusResult.status === 'expired') return false
+  if (statusResult.status === 'active') return true
+  if (!hasRouterUsage(user)) return false
+  if (source === ROUTER_SOURCE.USER_MANAGER) {
+    return Boolean(user.actualProfile || user.assignedProfile || user.profile)
+  }
+  return Boolean(user.profile || user.assignedProfile)
+}
+
 function buildActiveUserMetrics(user, { profileLimits = null, source } = {}) {
   const usedSec = parseUsageSeconds(user.uptime)
   let limitUptime = user.limitUptime || ''
@@ -1215,6 +1254,8 @@ function mapActiveUserRow(user, session, extras = {}) {
     lowVolume: metrics.lowVolume,
     ip: sessionIp(session),
     mac: sessionMac(session),
+    deviceName: sessionDeviceName(session),
+    server: sessionServerName(session),
     package: user.packageLabel || user.profile || user.assignedProfile || '',
     source: extras.source,
     sourceLabel: extras.sourceLabel,
@@ -1563,22 +1604,24 @@ async function fetchRouterUsersByQuery(api, path, primaryProplist, queryArgs = [
 }
 
 const HS_ACTIVE_USER_QUERIES = [
-  ['?disabled=no', '?active-sessions>0'],
   ['?disabled=no', '?uptime>00:00:00'],
   ['?disabled=no', '?bytes-in>0'],
   ['?disabled=no', '?bytes-out>0'],
 ]
 
 const UM_ACTIVE_USER_QUERIES = [
-  ['?disabled=no', '?active-sessions>0'],
   ['?disabled=no', '?actual-profile!='],
   ['?disabled=no', '?uptime-used>00:00:00'],
   ['?disabled=no', '?download-used>0'],
+  ['?disabled=no', '?upload-used>0'],
 ]
 
-const ACTIVE_USERS_QUERY_TIMEOUT_MS = 7000
-const ACTIVE_USERS_MAX_CANDIDATES = 400
-const ACTIVE_USERS_NAME_BATCH = 12
+const HS_ACTIVE_SESSION_PROPS = '=.proplist=user,address,mac-address,uptime,server,host-name'
+const UM_ACTIVE_SESSION_PROPS = '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active,host-name,nas-port-id,server'
+
+const ACTIVE_USERS_QUERY_TIMEOUT_MS = 25000
+const ACTIVE_USERS_MAX_UNFILTERED = 8000
+const ACTIVE_USERS_NAME_BATCH = 10
 
 async function routerWriteWithTimeout(api, path, args, timeoutMs = ACTIVE_USERS_QUERY_TIMEOUT_MS) {
   return Promise.race([
@@ -1589,20 +1632,41 @@ async function routerWriteWithTimeout(api, path, args, timeoutMs = ACTIVE_USERS_
   ])
 }
 
-async function fetchRouterUsersByQueryCapped(api, path, proplist, queryArgs = []) {
-  try {
-    const rows = await routerWriteWithTimeout(api, path, [proplist, ...queryArgs])
-    if (!Array.isArray(rows)) return []
-    if (rows.length > ACTIVE_USERS_MAX_CANDIDATES) {
-      console.warn(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} returned ${rows.length} rows — filter ignored`)
-      return []
+async function fetchActiveUserCandidates(api, path, proplist, queryVariants) {
+  for (const queryArgs of queryVariants) {
+    try {
+      const rows = await routerWriteWithTimeout(api, path, [proplist, ...queryArgs])
+      if (!Array.isArray(rows) || rows.length === 0) continue
+      if (rows.length > ACTIVE_USERS_MAX_UNFILTERED) {
+        console.warn(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} returned ${rows.length} — filter ignored`)
+        continue
+      }
+      console.info(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} => ${rows.length}`)
+      return dedupeRouterRows(rows)
+    } catch (error) {
+      if (isUserManagerUnavailable(error)) return []
+      if (error.message === 'ACTIVE_QUERY_TIMEOUT') {
+        console.warn(`[mikrotik] active-users query timeout ${path} ${queryArgs.join(' ')}`)
+        continue
+      }
+      console.warn(`[mikrotik] active-users query failed ${path} ${queryArgs.join(' ')}: ${error.message}`)
     }
-    return dedupeRouterRows(rows)
-  } catch (error) {
-    if (isUserManagerUnavailable(error)) return []
-    if (error.message === 'ACTIVE_QUERY_TIMEOUT') return []
-    throw error
   }
+  return []
+}
+
+async function fetchRouterUserByName(api, path, proplist, name) {
+  const key = String(name).trim()
+  if (!key) return null
+  for (const query of [`?name=${key}`, `?username=${key}`]) {
+    try {
+      const rows = await routerWriteWithTimeout(api, path, [proplist, query], 15000)
+      if (Array.isArray(rows) && rows[0]) return rows[0]
+    } catch {
+      // try next query
+    }
+  }
+  return null
 }
 
 async function fetchRouterUsersByNames(api, path, proplist, names) {
@@ -1612,34 +1676,15 @@ async function fetchRouterUsersByNames(api, path, proplist, names) {
   const rows = []
   for (let i = 0; i < unique.length; i += ACTIVE_USERS_NAME_BATCH) {
     const batch = unique.slice(i, i + ACTIVE_USERS_NAME_BATCH)
-    const chunk = await Promise.all(batch.map((name) => (
-      routerWriteWithTimeout(api, path, [proplist, `?name=${name}`], ACTIVE_USERS_QUERY_TIMEOUT_MS)
-        .then((result) => (Array.isArray(result) ? result[0] : null))
-        .catch(() => null)
-    )))
+    const chunk = await Promise.all(batch.map((name) => fetchRouterUserByName(api, path, proplist, name)))
     rows.push(...chunk.filter(Boolean))
   }
   return dedupeRouterRows(rows)
 }
 
 async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sessionNames = []) {
-  const attempts = await Promise.allSettled(
-    queryVariants.map((queryArgs) => fetchRouterUsersByQueryCapped(api, path, proplist, queryArgs))
-  )
-
-  const merged = new Map()
-  for (const attempt of attempts) {
-    if (attempt.status !== 'fulfilled') continue
-    for (const row of attempt.value) {
-      const key = row.name || row.username || row['.id']
-      if (key) merged.set(String(key), row)
-    }
-  }
-
-  if (merged.size > 0) {
-    console.info(`[mikrotik] active-users ${path} filtered => ${merged.size}`)
-    return [...merged.values()]
-  }
+  const fromQuery = await fetchActiveUserCandidates(api, path, proplist, queryVariants)
+  if (fromQuery.length > 0) return fromQuery
 
   if (sessionNames.length > 0) {
     const byName = await fetchRouterUsersByNames(api, path, proplist, sessionNames)
@@ -1664,14 +1709,14 @@ function buildLightUmProfileLimits(profilesRaw) {
   return index
 }
 
-function mapInventoryCardToActiveUser(card, umProfileLimits) {
-  const session = card.connectedIp
+function mapInventoryCardToActiveUser(card, umProfileLimits, sessionIndex) {
+  const session = sessionIndex?.get(card.name) || (card.connectedIp
     ? {
       address: card.connectedIp,
       'ip-address': card.connectedIp,
       uptime: card.sessionUptime || '',
     }
-    : null
+    : null)
   const user = {
     name: card.name,
     uptime: card.uptime || card.sessionUptime || '',
@@ -1692,6 +1737,36 @@ function mapInventoryCardToActiveUser(card, umProfileLimits) {
   })
 }
 
+async function getActiveUsersFromInventoryFilter(sourceFilter) {
+  const filterOptions = {
+    status: 'active',
+    source: sourceFilter === 'all' ? 'all' : sourceFilter,
+  }
+  const { filtered, snapshot } = await getFilteredRouterInventory(filterOptions)
+  if (!filtered?.length) return null
+
+  const umProfileLimits = new Map()
+  const sessionIndex = buildSessionIndex([
+    ...(snapshot?.hotspotSessions || []),
+    ...(snapshot?.umSessions || []),
+  ])
+
+  const rows = filtered.map((card) => mapInventoryCardToActiveUser(card, umProfileLimits, sessionIndex))
+  rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  return {
+    users: rows,
+    count: rows.length,
+    summary: {
+      total: rows.length,
+      hotspot: rows.filter((r) => r.source === ROUTER_SOURCE.HOTSPOT).length,
+      userManager: rows.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
+    },
+    fetchedAt: snapshot?.fetchedAt || new Date().toISOString(),
+    cached: true,
+  }
+}
+
 function tryActiveUsersFromInventoryCache(sourceFilter) {
   const snapshot = routerInventoryCache
   if (!snapshot?.cards?.length) return null
@@ -1707,7 +1782,8 @@ function tryActiveUsersFromInventoryCache(sourceFilter) {
   if (!cards.length) return null
 
   const umProfileLimits = new Map()
-  const rows = cards.map((card) => mapInventoryCardToActiveUser(card, umProfileLimits))
+  const sessionIndex = new Map()
+  const rows = cards.map((card) => mapInventoryCardToActiveUser(card, umProfileLimits, sessionIndex))
 
   rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
   return {
@@ -2896,51 +2972,58 @@ export async function getActiveUsers(options = {}) {
   if (!refresh) {
     const cached = tryActiveUsersFromInventoryCache(sourceFilter)
     if (cached) return cached
+    try {
+      const fromInventory = await getActiveUsersFromInventoryFilter(sourceFilter)
+      if (fromInventory?.users?.length) return fromInventory
+    } catch (error) {
+      console.warn('[mikrotik] active-users inventory filter failed:', error.message)
+    }
   }
 
   return withConnection(async (api) => {
     const [
       activeHotspotSessions,
-      umSessionsRaw,
+      umSessionsActive,
+      umSessionsOpen,
       hotspotProfilesRaw,
       umProfilesRaw,
     ] = await Promise.all([
       includeHotspot
-        ? routerWriteWithTimeout(
-          api,
-          '/ip/hotspot/active/print',
-          ['=.proplist=user,address,mac-address,uptime'],
-          ACTIVE_USERS_QUERY_TIMEOUT_MS
-        ).catch(() => [])
+        ? routerWriteWithTimeout(api, '/ip/hotspot/active/print', [HS_ACTIVE_SESSION_PROPS]).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
-        ? routerWriteWithTimeout(
-          api,
-          '/tool/user-manager/session/print',
-          ['?active=yes', '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active'],
-          ACTIVE_USERS_QUERY_TIMEOUT_MS
-        ).catch(() => [])
+        ? routerWriteWithTimeout(api, '/tool/user-manager/session/print', [
+          '?active=yes',
+          UM_ACTIVE_SESSION_PROPS,
+        ]).catch(() => [])
+        : Promise.resolve([]),
+      includeUserManager
+        ? routerWriteWithTimeout(api, '/tool/user-manager/session/print', [
+          '?ended=no',
+          UM_ACTIVE_SESSION_PROPS,
+        ]).catch(() => [])
         : Promise.resolve([]),
       includeHotspot
-        ? routerWriteWithTimeout(
-          api,
-          '/ip/hotspot/user/profile/print',
-          ['=.proplist=name'],
-          ACTIVE_USERS_QUERY_TIMEOUT_MS
-        ).catch(() => [])
+        ? routerWriteWithTimeout(api, '/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
         ? routerWriteWithTimeout(
           api,
           '/tool/user-manager/profile/print',
           ['=.proplist=name,uptime-limit,download-limit,upload-limit,transfer-limit'],
-          ACTIVE_USERS_QUERY_TIMEOUT_MS
         ).catch(() => [])
         : Promise.resolve([]),
     ])
 
-    const hsSessionNames = (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
-    const umSessionNames = (umSessionsRaw || []).map((s) => s.user || s.username).filter(Boolean)
+    const umSessionsMerged = dedupeRouterRows([
+      ...(umSessionsActive || []),
+      ...(umSessionsOpen || []),
+    ])
+    const hsSessionIndex = buildSessionIndex(activeHotspotSessions)
+    const umSessionIndex = buildSessionIndex(umSessionsMerged)
+
+    const hsSessionNames = [...hsSessionIndex.keys()]
+    const umSessionNames = [...umSessionIndex.keys()]
 
     const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
       includeHotspot
@@ -2968,17 +3051,20 @@ export async function getActiveUsers(options = {}) {
 
     const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
     const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
-    const umProfileLimits = buildLightUmProfileLimits(umProfilesRaw)
-    const umSessions = umSessionsRaw || []
+    let umProfileLimits = buildLightUmProfileLimits(umProfilesRaw)
+    if ((umUsersRaw?.length || 0) > 0 && (umUsersRaw?.length || 0) <= 200) {
+      const limitsByProfile = await fetchUserManagerLimitationData(api, umProfilesRaw).catch(() => ({}))
+      umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
+    }
 
     const rows = []
 
     if (includeHotspot) {
       for (const raw of hotspotUsersRaw || []) {
         const user = mapHotspotUserRow(raw)
-        const { status } = resolveCardStatus(user, hotspotProfileNames)
-        if (status !== 'active') continue
-        const session = findSessionForUser(activeHotspotSessions, user.name)
+        const status = resolveCardStatus(user, hotspotProfileNames)
+        if (!shouldIncludeActiveUser(user, status, ROUTER_SOURCE.HOTSPOT)) continue
+        const session = hsSessionIndex.get(user.name) || findSessionForUser(activeHotspotSessions, user.name)
         rows.push(mapActiveUserRow(user, session, {
           source: ROUTER_SOURCE.HOTSPOT,
           sourceLabel: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
@@ -2989,9 +3075,9 @@ export async function getActiveUsers(options = {}) {
     if (includeUserManager) {
       for (const raw of umUsersRaw || []) {
         const user = mapUserManagerUserRow(raw, '')
-        const { status } = resolveUserManagerCardStatus(user, umProfileNames, umProfileLimits)
-        if (status !== 'active') continue
-        const session = findSessionForUser(umSessions, user.name)
+        const status = resolveUserManagerCardStatus(user, umProfileNames, umProfileLimits)
+        if (!shouldIncludeActiveUser(user, status, ROUTER_SOURCE.USER_MANAGER)) continue
+        const session = umSessionIndex.get(user.name) || findSessionForUser(umSessionsMerged, user.name)
         rows.push(mapActiveUserRow(user, session, {
           source: ROUTER_SOURCE.USER_MANAGER,
           sourceLabel: routerSourceLabelAr(ROUTER_SOURCE.USER_MANAGER),
@@ -3004,6 +3090,17 @@ export async function getActiveUsers(options = {}) {
 
     console.info(`[mikrotik] active-users live: ${rows.length} (HS ${hotspotUsersRaw?.length || 0}, UM ${umUsersRaw?.length || 0})`)
 
+    if (rows.length === 0) {
+      try {
+        const fallback = await getActiveUsersFromInventoryFilter(sourceFilter)
+        if (fallback?.users?.length) {
+          return { ...fallback, cached: true, fallback: true }
+        }
+      } catch (error) {
+        console.warn('[mikrotik] active-users inventory fallback failed:', error.message)
+      }
+    }
+
     return {
       users: rows,
       count: rows.length,
@@ -3015,7 +3112,7 @@ export async function getActiveUsers(options = {}) {
       fetchedAt: new Date().toISOString(),
       cached: false,
     }
-  }, { operationTimeoutSec: 60 })
+  }, { operationTimeoutSec: 90 })
 }
 
 export async function getCombinedInventory(options = {}) {
