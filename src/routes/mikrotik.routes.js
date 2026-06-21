@@ -13,6 +13,7 @@ import {
   syncRouterCardsCount,
   diagnoseUserManagerLimits,
   syncAllFromRouter,
+  getActiveUsers,
 } from '../services/mikrotik.service.js'
 
 const router = Router()
@@ -171,6 +172,16 @@ router.get('/user-manager/customers', async (_req, res) => {
   } catch (error) {
     console.error(error)
     res.status(502).json({ message: error.message || 'تعذر جلب عملاء User Manager من الراوتر' })
+  }
+})
+
+router.get('/active-users', async (req, res) => {
+  try {
+    const data = await getActiveUsers({ source: req.query.source || 'all' })
+    res.json(data)
+  } catch (error) {
+    console.error(error)
+    res.status(502).json({ message: error.message || 'تعذر جلب المستخدمين النشطين' })
   }
 })
 

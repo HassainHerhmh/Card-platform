@@ -13,7 +13,8 @@ export const DEFAULT_PRINT_TEMPLATE = {
   info2: '',
   logoUrl: '',
   backgroundImage: '',
-  border: { enabled: true, size: 1, color: '#000000' },
+  border: { enabled: true, size: 1, color: '#000000', style: 'solid' },
+  previewMode: 'single',
   pageLayout: { cardsPerPage: 51, columns: 3 },
   elements: {
     username: { enabled: true, label: 'اسم المستخدم', x: 22, y: 5, fontSize: 10, fontFamily: 'Arial', bold: true, italic: false, color: '#000000' },

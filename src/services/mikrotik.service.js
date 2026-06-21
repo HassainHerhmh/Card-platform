@@ -1127,6 +1127,98 @@ function formatUptimeDisplay(value) {
   return formatRosDurationToHms(value)
 }
 
+function formatSecondsToHms(totalSec) {
+  const sec = Math.max(0, Math.floor(Number(totalSec) || 0))
+  if (sec <= 0) return '0:00:00'
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function findSessionForUser(sessions, userName) {
+  if (!userName) return null
+  return (sessions || []).find((s) => (s.user || s.username) === userName) || null
+}
+
+function sessionIp(session) {
+  return session?.address || session?.['ip-address'] || ''
+}
+
+function sessionMac(session) {
+  return session?.['mac-address'] || session?.['calling-station-id'] || ''
+}
+
+function buildActiveUserMetrics(user, { profileLimits = null, source } = {}) {
+  const usedSec = parseUsageSeconds(user.uptime)
+  let limitUptime = user.limitUptime || ''
+  let transferLimit = 0
+  let downloadLimit = 0
+  let uploadLimit = 0
+
+  if (source === ROUTER_SOURCE.USER_MANAGER) {
+    const profileName = user.actualProfile || user.assignedProfile || user.profile || ''
+    const limits = profileName && profileLimits?.get ? profileLimits.get(profileName) : null
+    limitUptime = limitUptime || limits?.['uptime-limit'] || ''
+    transferLimit = parseLimitBytes(limits?.['transfer-limit'])
+    downloadLimit = parseLimitBytes(limits?.['download-limit'])
+    uploadLimit = parseLimitBytes(limits?.['upload-limit'])
+  } else {
+    downloadLimit = parseByteLimit(user.limitBytesIn)
+    uploadLimit = parseByteLimit(user.limitBytesOut)
+  }
+
+  const limitSec = parseUsageSeconds(limitUptime)
+  const remainingSec = limitSec > 0 ? Math.max(0, limitSec - usedSec) : null
+
+  const bytesIn = Number(user.bytesIn || 0)
+  const bytesOut = Number(user.bytesOut || 0)
+  const totalUsed = bytesIn + bytesOut
+
+  let remainingBytes = null
+  let totalLimitBytes = 0
+  if (transferLimit > 0) {
+    totalLimitBytes = transferLimit
+    remainingBytes = Math.max(0, transferLimit - totalUsed)
+  } else if (downloadLimit > 0 || uploadLimit > 0) {
+    const remIn = downloadLimit > 0 ? Math.max(0, downloadLimit - bytesIn) : Infinity
+    const remOut = uploadLimit > 0 ? Math.max(0, uploadLimit - bytesOut) : Infinity
+    remainingBytes = Math.min(remIn, remOut)
+    if (!Number.isFinite(remainingBytes)) remainingBytes = null
+    totalLimitBytes = Math.min(
+      downloadLimit > 0 ? downloadLimit : Infinity,
+      uploadLimit > 0 ? uploadLimit : Infinity
+    )
+    if (!Number.isFinite(totalLimitBytes)) totalLimitBytes = downloadLimit || uploadLimit || 0
+  }
+
+  const lowVolume = remainingBytes != null && totalLimitBytes > 0
+    && remainingBytes / totalLimitBytes < 0.15
+
+  return {
+    usedTime: formatUptimeDisplay(user.uptime),
+    remainingTime: remainingSec != null ? formatSecondsToHms(remainingSec) : '',
+    remainingVolume: remainingBytes != null ? formatTrafficAmount(remainingBytes) : '',
+    lowVolume,
+  }
+}
+
+function mapActiveUserRow(user, session, extras = {}) {
+  const metrics = buildActiveUserMetrics(user, extras)
+  return {
+    name: user.name,
+    usedTime: metrics.usedTime,
+    remainingTime: metrics.remainingTime,
+    remainingVolume: metrics.remainingVolume,
+    lowVolume: metrics.lowVolume,
+    ip: sessionIp(session),
+    mac: sessionMac(session),
+    package: user.packageLabel || user.profile || user.assignedProfile || '',
+    source: extras.source,
+    sourceLabel: extras.sourceLabel,
+  }
+}
+
 function formatLastSeen(value) {
   if (value == null || value === '' || String(value).toLowerCase() === 'never') return 'never'
   return String(value).trim()
@@ -2625,6 +2717,109 @@ function buildMissingInventoryCard(dbRow) {
     sourceLabel: routerSourceLabel(source),
     sourceLabelAr: routerSourceLabelAr(source),
   }
+}
+
+export async function getActiveUsers(options = {}) {
+  const rawSource = String(options.source || 'all').toLowerCase()
+  const sourceFilter = rawSource === ROUTER_SOURCE.USER_MANAGER || rawSource === 'usermanager'
+    ? ROUTER_SOURCE.USER_MANAGER
+    : rawSource === ROUTER_SOURCE.HOTSPOT
+      ? ROUTER_SOURCE.HOTSPOT
+      : 'all'
+  const includeHotspot = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.HOTSPOT
+  const includeUserManager = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.USER_MANAGER
+
+  return withConnection(async (api) => {
+    const [
+      hotspotUsersRaw,
+      activeHotspotSessions,
+      hotspotProfilesRaw,
+      umUsersRaw,
+      umSessionsRaw,
+      umProfilesRaw,
+      umUserProfileMap,
+    ] = await Promise.all([
+      includeHotspot
+        ? printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]).catch(() => [])
+        : Promise.resolve([]),
+      includeHotspot
+        ? api.write('/ip/hotspot/active/print', ['=.proplist=user,address,mac-address,uptime']).catch(() => [])
+        : Promise.resolve([]),
+      includeHotspot
+        ? api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
+        : Promise.resolve([]),
+      includeUserManager
+        ? printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
+          if (isUserManagerUnavailable(error)) return []
+          throw error
+        })
+        : Promise.resolve([]),
+      includeUserManager
+        ? api.write('/tool/user-manager/session/print', [
+          '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active',
+        ]).catch(() => [])
+        : Promise.resolve([]),
+      includeUserManager
+        ? api.write('/tool/user-manager/profile/print').catch(() => [])
+        : Promise.resolve([]),
+      includeUserManager ? fetchUmUserProfileNameMap(api) : Promise.resolve(new Map()),
+    ])
+
+    const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
+    const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
+    const limitsByProfile = includeUserManager
+      ? await fetchUserManagerLimitationData(api, umProfilesRaw)
+      : {}
+    const umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
+
+    const umSessions = (umSessionsRaw || []).filter((s) => {
+      const active = s.active
+      return active === true || active === 'true' || active === 'yes' || active == null
+    })
+
+    const rows = []
+
+    if (includeHotspot) {
+      for (const raw of hotspotUsersRaw || []) {
+        const user = mapHotspotUserRow(raw)
+        const { status } = resolveCardStatus(user, hotspotProfileNames)
+        if (status !== 'active') continue
+        const session = findSessionForUser(activeHotspotSessions, user.name)
+        rows.push(mapActiveUserRow(user, session, {
+          source: ROUTER_SOURCE.HOTSPOT,
+          sourceLabel: routerSourceLabelAr(ROUTER_SOURCE.HOTSPOT),
+        }))
+      }
+    }
+
+    if (includeUserManager) {
+      for (const raw of umUsersRaw || []) {
+        const userName = raw.name || raw.username || ''
+        const user = mapUserManagerUserRow(raw, umUserProfileMap.get(userName) || '')
+        const { status } = resolveUserManagerCardStatus(user, umProfileNames, umProfileLimits)
+        if (status !== 'active') continue
+        const session = findSessionForUser(umSessions, user.name)
+        rows.push(mapActiveUserRow(user, session, {
+          source: ROUTER_SOURCE.USER_MANAGER,
+          sourceLabel: routerSourceLabelAr(ROUTER_SOURCE.USER_MANAGER),
+          profileLimits: umProfileLimits,
+        }))
+      }
+    }
+
+    rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+    return {
+      users: rows,
+      count: rows.length,
+      summary: {
+        total: rows.length,
+        hotspot: rows.filter((r) => r.source === ROUTER_SOURCE.HOTSPOT).length,
+        userManager: rows.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
+      },
+      fetchedAt: new Date().toISOString(),
+    }
+  })
 }
 
 export async function getCombinedInventory(options = {}) {
