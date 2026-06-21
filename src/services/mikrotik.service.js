@@ -2,6 +2,10 @@ import { RouterOSAPI } from 'node-routeros'
 import { query } from '../db/pool.js'
 import { env } from '../config/env.js'
 import {
+  resolveMikrotikConnectionConfig,
+  isQuickLoginEnabled,
+} from './mikrotik-connection.service.js'
+import {
   ROUTER_SOURCE,
   normalizeRouterSource,
   routerSourceLabel,
@@ -14,25 +18,18 @@ function getInventoryMaxCap() {
 }
 
 function getConnectionConfig() {
-  let host = env.mikrotik.host.trim()
-  let port = env.mikrotik.port
-
-  if (host.includes(':')) {
-    const idx = host.lastIndexOf(':')
-    const maybePort = Number(host.slice(idx + 1))
-    if (maybePort) {
-      port = maybePort
-      host = host.slice(0, idx)
-    }
-  }
-
+  const cfg = resolveMikrotikConnectionConfig()
   return {
-    host,
-    port,
-    user: env.mikrotik.user,
-    password: env.mikrotik.password,
-    tls: env.mikrotik.useTls ? { rejectUnauthorized: false } : undefined,
+    host: cfg.host,
+    port: cfg.port,
+    user: cfg.user,
+    password: cfg.password,
+    tls: cfg.tls,
   }
+}
+
+function connectionNotConfiguredMessage() {
+  return 'لم يتم إعداد اتصال الميكروتك — افتح «تهيئة الاتصال» من القائمة'
 }
 
 function formatHost(cfg) {
@@ -54,7 +51,7 @@ function getOperationTimeoutSec(forInventory = false) {
 function createRouterApi(forInventory = false) {
   const cfg = getConnectionConfig()
   if (!cfg.host || !cfg.user || !cfg.password) {
-    throw new Error('إعدادات الميكروتك غير مكتملة في ملف .env على السيرفر')
+    throw new Error(connectionNotConfiguredMessage())
   }
 
   const connectTimeout = getConnectTimeoutSec()
@@ -281,13 +278,141 @@ export async function syncRouterCardsCount(liveCount) {
   return { count: liveCount, synced: true }
 }
 
-export async function getRouterStatus() {
+export async function fetchRouterStatusFull() {
   const cfg = getConnectionConfig()
   if (!cfg.host || !cfg.user || !cfg.password) {
     return {
       connected: false,
       host: formatHost(cfg),
-      message: 'إعدادات الميكروتك غير مكتملة في ملف .env على السيرفر',
+      configured: false,
+      message: connectionNotConfiguredMessage(),
+    }
+  }
+
+  return withConnection(async (api, connection) => {
+    const identityRows = await api.write('/system/identity/print')
+    const resourceRows = await api.write('/system/resource/print')
+    const identity = identityRows?.[0] || {}
+    const resource = resourceRows?.[0] || {}
+
+    const [hotspotUsers, activeHotspotUsers, umLite, neighborCount] = await Promise.all([
+      printCount(api, '/ip/hotspot/user/print'),
+      printCount(api, '/ip/hotspot/active/print'),
+      fetchUserManagerStatusLite(api),
+      countConnectedNeighbors(api),
+    ])
+
+    const { userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, userManager } = umLite
+    const connectedUsers = activeHotspotUsers
+
+    return {
+      connected: true,
+      configured: true,
+      quickLogin: isQuickLoginEnabled(),
+      host: formatHost(connection),
+      externalDomain: connection.host,
+      port: connection.port,
+      identity: identity.name || 'MikroTik',
+      version: resource.version || '',
+      boardName: resource['board-name'] || '',
+      uptime: resource.uptime || '',
+      hotspotUsers,
+      activeHotspotUsers,
+      userManagerUsers,
+      userManagerSessionsTotal,
+      activeUserManagerSessions,
+      connectedUsers,
+      activeUsers: connectedUsers,
+      neighborCount,
+      userManager,
+      totalCards: hotspotUsers + userManagerUsers,
+      cpuLoad: resource['cpu-load'] ?? null,
+      message: `متصل — ${identity.name || connection.host}`,
+      warmedAt: new Date().toISOString(),
+    }
+  })
+}
+
+let routerStatusCache = null
+let routerStatusCacheAt = 0
+const ROUTER_STATUS_CACHE_MS = 6 * 60 * 60 * 1000
+
+function setRouterStatusCache(status) {
+  if (!status?.connected) return
+  routerStatusCache = status
+  routerStatusCacheAt = Date.now()
+}
+
+export function getCachedRouterStatus() {
+  if (!routerStatusCache) return null
+  if (Date.now() - routerStatusCacheAt > ROUTER_STATUS_CACHE_MS) return null
+  return { ...routerStatusCache, cached: true }
+}
+
+export function clearMikrotikWarmCache() {
+  routerStatusCache = null
+  routerStatusCacheAt = 0
+  routerInventoryCache = null
+  routerInventoryCacheAt = 0
+  disabledRouterInventoryCache = null
+  disabledRouterInventoryCacheAt = 0
+  routerInventoryBuildPromise = null
+  resetRouterInventoryBuildProgress()
+}
+
+export async function warmMikrotikData() {
+  console.info('[mikrotik] warm: start')
+
+  const status = await fetchRouterStatusFull().catch((error) => {
+    console.error('[mikrotik] warm: status failed', error.message)
+    throw error
+  })
+  setRouterStatusCache(status)
+
+  const [syncResult, inventory] = await Promise.all([
+    syncAllFromRouter().catch((error) => {
+      console.warn('[mikrotik] warm: sync skipped', error.message)
+      return null
+    }),
+    ensureRouterInventoryBuild().catch((error) => {
+      console.warn('[mikrotik] warm: inventory failed', error.message)
+      throw error
+    }),
+  ])
+
+  let activeUsers = { count: 0, summary: { total: 0, hotspot: 0, userManager: 0 } }
+  try {
+    activeUsers = await getActiveUsers({ refresh: false, source: 'all' })
+  } catch (error) {
+    console.warn('[mikrotik] warm: active-users cache read failed', error.message)
+  }
+
+  console.info(`[mikrotik] warm: done — inventory ${inventory?.cards?.length || 0}, active ${activeUsers.count || 0}`)
+
+  return {
+    status: getCachedRouterStatus() || status,
+    inventoryCards: inventory?.cards?.length || routerInventoryCache?.cards?.length || 0,
+    activeUsers: activeUsers.count || 0,
+    activeSummary: activeUsers.summary || null,
+    categoriesSynced: syncResult?.categories?.synced ?? null,
+    warmedAt: new Date().toISOString(),
+  }
+}
+
+export async function getRouterStatus(options = {}) {
+  const refresh = options.refresh === true || options.refresh === '1'
+  if (!refresh) {
+    const cached = getCachedRouterStatus()
+    if (cached) return cached
+  }
+
+  const cfg = getConnectionConfig()
+  if (!cfg.host || !cfg.user || !cfg.password) {
+    return {
+      connected: false,
+      host: formatHost(cfg),
+      configured: false,
+      message: connectionNotConfiguredMessage(),
     }
   }
 
@@ -295,6 +420,36 @@ export async function getRouterStatus() {
     return await withConnection(async (api, connection) => {
       const identityRows = await api.write('/system/identity/print')
       const resourceRows = await api.write('/system/resource/print')
+      const identity = identityRows?.[0] || {}
+      const resource = resourceRows?.[0] || {}
+
+      if (isQuickLoginEnabled() && !refresh) {
+        const lightweight = {
+          connected: true,
+          configured: true,
+          quickLogin: true,
+          host: formatHost(connection),
+          externalDomain: connection.host,
+          port: connection.port,
+          identity: identity.name || 'MikroTik',
+          version: resource.version || '',
+          boardName: resource['board-name'] || '',
+          uptime: resource.uptime || '',
+          hotspotUsers: null,
+          activeHotspotUsers: null,
+          userManagerUsers: null,
+          userManagerSessionsTotal: null,
+          activeUserManagerSessions: null,
+          connectedUsers: null,
+          activeUsers: null,
+          neighborCount: null,
+          userManager: null,
+          totalCards: null,
+          cpuLoad: resource['cpu-load'] ?? null,
+          message: `متصل — ${identity.name || connection.host}`,
+        }
+        return lightweight
+      }
 
       const [hotspotUsers, activeHotspotUsers, umLite, neighborCount] = await Promise.all([
         printCount(api, '/ip/hotspot/user/print'),
@@ -305,13 +460,13 @@ export async function getRouterStatus() {
 
       const { userManagerUsers, userManagerSessionsTotal, activeUserManagerSessions, userManager } = umLite
 
-      const identity = identityRows?.[0] || {}
-      const resource = resourceRows?.[0] || {}
       // المتصلون = نفس «متصل» في صفحة ميكروتك (Hotspot active)
       const connectedUsers = activeHotspotUsers
 
-      return {
+      const fullStatus = {
         connected: true,
+        configured: true,
+        quickLogin: false,
         host: formatHost(connection),
         externalDomain: connection.host,
         port: connection.port,
@@ -332,6 +487,8 @@ export async function getRouterStatus() {
         cpuLoad: resource['cpu-load'] ?? null,
         message: `متصل — ${identity.name || connection.host}`,
       }
+      setRouterStatusCache(fullStatus)
+      return fullStatus
     })
   } catch (error) {
     console.error('[mikrotik]', error.message)
@@ -2977,6 +3134,18 @@ export async function getActiveUsers(options = {}) {
       if (fromInventory?.users?.length) return fromInventory
     } catch (error) {
       console.warn('[mikrotik] active-users inventory filter failed:', error.message)
+    }
+
+    if (isQuickLoginEnabled()) {
+      return {
+        users: [],
+        count: 0,
+        summary: { total: 0, hotspot: 0, userManager: 0 },
+        fetchedAt: new Date().toISOString(),
+        cached: false,
+        quickLogin: true,
+        message: 'الدخول السريع مفعّل — اضغط «تحديث» لجلب النشطين من الراوتر',
+      }
     }
   }
 

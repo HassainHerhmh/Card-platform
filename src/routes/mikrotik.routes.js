@@ -2,6 +2,11 @@ import { Router } from 'express'
 import { requireAuth } from '../middleware/auth.js'
 import { query } from '../db/pool.js'
 import {
+  getConnectionSettings,
+  saveConnectionSettings,
+  testMikrotikConnection,
+} from '../services/mikrotik-connection.service.js'
+import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
@@ -14,10 +19,53 @@ import {
   diagnoseUserManagerLimits,
   syncAllFromRouter,
   getActiveUsers,
+  warmMikrotikData,
+  clearMikrotikWarmCache,
 } from '../services/mikrotik.service.js'
 
 const router = Router()
 router.use(requireAuth)
+
+router.post('/connection/warm', async (_req, res) => {
+  try {
+    const result = await warmMikrotikData()
+    res.json(result)
+  } catch (error) {
+    console.error('[mikrotik] warm failed:', error)
+    res.status(502).json({ message: error.message || 'تعذر تحميل بيانات الميكروتك' })
+  }
+})
+
+router.get('/connection', async (_req, res) => {
+  try {
+    const settings = await getConnectionSettings()
+    res.json(settings)
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب إعدادات الاتصال' })
+  }
+})
+
+router.put('/connection', async (req, res) => {
+  try {
+    clearMikrotikWarmCache()
+    const settings = await saveConnectionSettings(req.body || {})
+    res.json(settings)
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ message: error.message || 'تعذر حفظ إعدادات الاتصال' })
+  }
+})
+
+router.post('/connection/test', async (req, res) => {
+  try {
+    const result = await testMikrotikConnection(req.body || {})
+    res.json(result)
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ ok: false, message: error.message || 'تعذر اختبار الاتصال' })
+  }
+})
 
 router.get('/routers', async (_req, res) => {
   try {
@@ -71,9 +119,10 @@ router.get('/routers', async (_req, res) => {
   }
 })
 
-router.get('/status', async (_req, res) => {
+router.get('/status', async (req, res) => {
   try {
-    const status = await getRouterStatus()
+    const refresh = req.query.refresh === '1' || req.query.refresh === 'true'
+    const status = await getRouterStatus({ refresh })
     if (status.connected) {
       await syncRouterCardsCount(status.totalCards ?? status.hotspotUsers ?? 0)
     }

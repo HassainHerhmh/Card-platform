@@ -54,6 +54,17 @@ export async function migrate() {
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     )`,
+    `CREATE TABLE IF NOT EXISTS mikrotik_connection_config (
+      id TINYINT PRIMARY KEY DEFAULT 1,
+      host_type VARCHAR(10) NOT NULL DEFAULT 'domain',
+      host VARCHAR(255) NOT NULL DEFAULT '',
+      port INT NOT NULL DEFAULT 8728,
+      username VARCHAR(255) NOT NULL DEFAULT '',
+      password VARCHAR(500) NOT NULL DEFAULT '',
+      use_tls TINYINT(1) NOT NULL DEFAULT 0,
+      quick_login TINYINT(1) NOT NULL DEFAULT 1,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
   ]
 
   for (const patch of patches) {
