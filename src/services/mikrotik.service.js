@@ -405,18 +405,12 @@ function scheduleBackgroundMikrotikWarm() {
   if (backgroundWarmPromise) return backgroundWarmPromise
 
   backgroundWarmPromise = (async () => {
-    console.info('[mikrotik] background warm: start')
+    console.info('[mikrotik] background warm: sync categories only (inventory on demand)')
     try {
       await syncAllFromRouter()
+      console.info('[mikrotik] background warm: categories synced')
     } catch (error) {
       console.warn('[mikrotik] background warm: sync skipped', error.message)
-    }
-    try {
-      await ensureRouterInventoryBuild()
-      refreshActiveUsersCacheFromInventory()
-      console.info('[mikrotik] background warm: inventory done')
-    } catch (error) {
-      console.warn('[mikrotik] background warm: inventory failed', error.message)
     }
   })().finally(() => {
     backgroundWarmPromise = null
@@ -2297,6 +2291,12 @@ const UM_USER_PROPS = [
 ]
 
 const ROUTER_PRINT_PAGE_HINT = 1000
+const UM_PRINT_PAGE_SIZE = 80
+const HS_PRINT_PAGE_SIZE = 400
+
+function umMinimalProplist() {
+  return '=.proplist=name,username,actual-profile,profile,disabled,uptime-used,download-used,upload-used,last-seen,comment,location,password'
+}
 
 function dedupeRouterRows(rows) {
   const seen = new Set()
@@ -2313,10 +2313,70 @@ function dedupeRouterRows(rows) {
 }
 
 async function fetchPrintPages(api, path, proplist, expected = 0, onProgress = null, extraArgs = []) {
+  const staticQuery = (extraArgs || []).filter(
+    (a) => a.startsWith('?') && !a.startsWith('?#') && !a.startsWith('?.') && !a.startsWith('?#>'),
+  )
+  const isUm = path.includes('user-manager')
+  const pageSize = isUm ? UM_PRINT_PAGE_SIZE : HS_PRINT_PAGE_SIZE
+
+  const proplistAttempts = isUm
+    ? [proplist, umMinimalProplist(), UM_USER_PROPS[2], null].filter((p, i, arr) => arr.indexOf(p) === i)
+    : [proplist, null].filter((p, i, arr) => arr.indexOf(p) === i)
+
+  for (const attemptProplist of proplistAttempts) {
+    const all = []
+    let cursor = ''
+
+    for (let page = 0; page < 600; page++) {
+      const args = []
+      if (attemptProplist) args.push(attemptProplist)
+      args.push(...staticQuery)
+      args.push(`?#=${pageSize}`)
+      if (cursor) args.push(`.id=${cursor}`)
+
+      let batch
+      try {
+        batch = await api.write(path, args)
+      } catch (error) {
+        if (isUserManagerUnavailable(error)) return dedupeRouterRows(all)
+        if (page === 0) break
+        break
+      }
+
+      if (!Array.isArray(batch) || !batch.length) {
+        if (page === 0) break
+        break
+      }
+
+      const before = all.length
+      for (const row of batch) {
+        const id = row['.id']
+        if (id && all.some((r) => r['.id'] === id)) continue
+        all.push(row)
+      }
+      if (all.length === before) break
+
+      const lastId = batch[batch.length - 1]?.['.id']
+      if (!lastId) break
+      if (expected > 0 && all.length >= expected) break
+      if (batch.length < pageSize) break
+
+      cursor = lastId
+      if (onProgress) onProgress(all.length, expected || all.length)
+    }
+
+    const unique = dedupeRouterRows(all)
+    if (unique.length > 0) {
+      if (onProgress) onProgress(unique.length, expected || unique.length)
+      if (expected > 0 && unique.length < expected) {
+        console.warn(`[mikrotik] ${path} pagination got ${unique.length}/${expected}`)
+      }
+      return unique
+    }
+  }
+
   const all = []
   let cursor = ''
-  const staticQuery = (extraArgs || []).filter((a) => a.startsWith('?') && !a.startsWith('?#'))
-
   for (let page = 0; page < 200; page++) {
     const args = []
     if (proplist) args.push(proplist)
@@ -2328,7 +2388,7 @@ async function fetchPrintPages(api, path, proplist, expected = 0, onProgress = n
       batch = await api.write(path, args)
     } catch (error) {
       if (isUserManagerUnavailable(error)) return dedupeRouterRows(all)
-      if (page === 0) throw error
+      if (page === 0) break
       break
     }
 
@@ -2353,7 +2413,7 @@ async function fetchPrintPages(api, path, proplist, expected = 0, onProgress = n
 
   const unique = dedupeRouterRows(all)
   if (onProgress) onProgress(unique.length, expected || unique.length)
-  if (expected > 0 && unique.length < expected) {
+  if (expected > 0 && unique.length < expected && unique.length > 0) {
     console.warn(`[mikrotik] ${path} pagination got ${unique.length}/${expected}`)
   }
   return unique
@@ -2504,7 +2564,7 @@ async function buildRouterInventorySnapshot(api) {
   ] = await Promise.all([
     printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], { onProgress: onHotspotProgress }),
     api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
-    printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS, { onProgress: onUmProgress }),
+    printWithProplistFallback(api, '/tool/user-manager/user/print', [umMinimalProplist(), ...UM_USER_PROPS], { onProgress: onUmProgress }),
     api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
     printCount(api, '/tool/user-manager/user/print').catch(() => 0),
     api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
@@ -2655,6 +2715,7 @@ function ensureRouterInventoryBuild() {
       routerInventoryCache = enriched
       routerInventoryCacheAt = Date.now()
       finishRouterInventoryBuildProgress(enriched.cards.length)
+      refreshActiveUsersCacheFromInventory()
       return enriched
     })
     .catch((error) => {
@@ -2862,40 +2923,23 @@ function computeInventorySummary(cards) {
 }
 
 async function fetchHotspotUsersIndexed(api, codeSet) {
-  const activeSessions = await api.write('/ip/hotspot/active/print').catch(() => [])
+  const activeSessions = await api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => [])
   const activeUsernames = new Set(
     (activeSessions || []).map((s) => s.user).filter(Boolean)
   )
 
   const byName = new Map()
-  const proplist = ['=.proplist=name,profile,comment,disabled,uptime,bytes-in,bytes-out']
-
   if (!codeSet.size) {
     return { byName, activeUsernames, activeSessions: activeSessions || [] }
   }
 
-  try {
-    const usersRaw = await printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0])
-    for (const u of usersRaw || []) {
-      if (u.name && codeSet.has(u.name)) byName.set(u.name, mapHotspotUserRow(u))
-    }
-  } catch {
-    // fall back to per-code lookup below
-  }
-
-  const unresolved = [...codeSet].filter((c) => !byName.has(c))
-  if (unresolved.length > 0) {
-    const batchSize = 30
-    for (let i = 0; i < unresolved.length; i += batchSize) {
-      await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
-        try {
-          const rows = await api.write('/ip/hotspot/user/print', [`?name=${code}`, ...proplist])
-          if (rows?.[0]?.name) byName.set(rows[0].name, mapHotspotUserRow(rows[0]))
-        } catch {
-          // skip missing
-        }
-      }))
-    }
+  const unresolved = [...codeSet]
+  const batchSize = 40
+  for (let i = 0; i < unresolved.length; i += batchSize) {
+    await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
+      const row = await fetchRouterUserByName(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], code)
+      if (row?.name) byName.set(row.name, mapHotspotUserRow(row))
+    }))
   }
 
   return { byName, activeUsernames, activeSessions: activeSessions || [] }
@@ -3103,39 +3147,117 @@ async function enrichDbRowsWithRouter(dbRows, { refresh = false } = {}) {
     }
   }
 
-  const refreshRequested = refresh === true || refresh === '1'
-  let index = null
+  let resolvedCards = []
+  let pendingRows = dbRows
+
+  if (!refresh) {
+    const snapshot = await getCachedRouterInventory({ refresh: false })
+    if (snapshot?.cards?.length) {
+      const { cards, missingCodes } = enrichDbRowsFromSnapshot(dbRows, snapshot)
+      if (cards.length) {
+        resolvedCards = cards
+        if (!missingCodes.length) {
+          return {
+            cards,
+            purged: 0,
+            sources: snapshot.sources,
+            userManager: snapshot.userManager,
+          }
+        }
+        const missingSet = new Set(missingCodes)
+        pendingRows = dbRows.filter((row) => missingSet.has(row.code))
+      }
+    }
+  }
+
+  const hsCodes = new Set()
+  const umCodes = new Set()
+  for (const row of pendingRows) {
+    const source = normalizeRouterSource(row.routerSource)
+    if (source === ROUTER_SOURCE.USER_MANAGER) umCodes.add(row.code)
+    else hsCodes.add(row.code)
+  }
+
+  const hotspotIndex = {
+    byName: new Map(),
+    profileNames: new Set(),
+    activeSessions: [],
+  }
+  const umIndex = {
+    byName: new Map(),
+    profileNames: new Set(),
+    sessions: [],
+  }
+  let userManagerAvailable = false
+  let hotspotOk = false
 
   await withConnection(async (api) => {
-    index = await getRouterEnrichmentIndex(api, { refresh: refreshRequested })
+    const [activeHotspotSessions, umSessionsRaw, hotspotProfilesRaw, umProfilesRaw] = await Promise.all([
+      api.write('/ip/hotspot/active/print', ['=.proplist=user,address,uptime']).catch(() => []),
+      api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => []),
+      api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => []),
+      api.write('/tool/user-manager/profile/print', ['=.proplist=name']).catch(() => []),
+    ])
+
+    hotspotIndex.activeSessions = activeHotspotSessions || []
+    umIndex.sessions = umSessionsRaw || []
+    for (const p of hotspotProfilesRaw || []) {
+      if (p.name) hotspotIndex.profileNames.add(p.name)
+    }
+    for (const p of umProfilesRaw || []) {
+      if (p.name) umIndex.profileNames.add(p.name)
+    }
+
+    if (hsCodes.size) {
+      const hs = await fetchHotspotUsersIndexed(api, hsCodes)
+      hotspotIndex.byName = hs.byName
+      hotspotOk = hs.byName.size > 0
+    }
+
+    if (umCodes.size) {
+      try {
+        const um = await fetchUserManagerUsersIndexed(api, umCodes)
+        umIndex.byName = um.byName
+        userManagerAvailable = true
+      } catch (error) {
+        if (!isUserManagerUnavailable(error)) throw error
+      }
+    }
   })
 
-  const { cards, missingCodes } = lookupDbRowsWithRouterIndex(dbRows, index)
+  const { cards: fetchedCards, missingCodes } = lookupDbRowsWithRouterIndex(pendingRows, {
+    hotspotIndex,
+    umIndex,
+  })
+
+  const cards = [...resolvedCards, ...fetchedCards]
 
   let purged = 0
   if (missingCodes.length) {
     purged = await purgeStaleCardsFromDb(missingCodes)
-    console.info(`[mikrotik] purged ${purged} card(s) missing from router:`, missingCodes.join(', '))
+    if (purged) {
+      console.info(`[mikrotik] purged ${purged} card(s) missing from router:`, missingCodes.join(', '))
+    }
   }
 
   return {
     cards,
     purged,
     sources: {
-      hotspot: index.hotspotOk,
-      userManager: index.userManagerAvailable && index.umOk,
+      hotspot: hotspotOk || hsCodes.size === 0,
+      userManager: userManagerAvailable,
     },
     userManager: {
-      available: index.userManagerAvailable,
+      available: userManagerAvailable,
       customers: [],
       defaultCustomer: null,
-      profiles: 0,
+      profiles: umIndex.profileNames.size,
     },
   }
 }
 
 async function fetchUserManagerUsersIndexed(api, codeSet) {
-  const sessions = await api.write('/tool/user-manager/session/print').catch(() => [])
+  const sessions = await api.write('/tool/user-manager/session/print', ['=.proplist=user,username,ip-address,address,uptime']).catch(() => [])
   const activeUsernames = new Set(
     (sessions || []).map((s) => s.user || s.username).filter(Boolean)
   )
@@ -3145,35 +3267,16 @@ async function fetchUserManagerUsersIndexed(api, codeSet) {
     return { byName, activeUsernames, sessions: sessions || [] }
   }
 
-  try {
-    const usersRaw = await printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS)
-    for (const u of usersRaw || []) {
-      const name = u.username || u.name
-      if (name && codeSet.has(name)) byName.set(name, mapUserManagerUserRow(u))
-    }
-  } catch {
-    // fall back to per-code lookup below
-  }
-
-  const unresolved = [...codeSet].filter((c) => !byName.has(c))
-  if (unresolved.length > 0) {
-    const batchSize = 30
-    for (let i = 0; i < unresolved.length; i += batchSize) {
-      await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
-        for (const queryWord of [`?username=${code}`, `?name=${code}`]) {
-          try {
-            const rows = await api.write('/tool/user-manager/user/print', [queryWord])
-            const row = rows?.find((r) => (r.username || r.name) === code)
-            if (row) {
-              byName.set(code, mapUserManagerUserRow(row))
-              break
-            }
-          } catch {
-            // try next query field
-          }
-        }
-      }))
-    }
+  const unresolved = [...codeSet]
+  const batchSize = 40
+  for (let i = 0; i < unresolved.length; i += batchSize) {
+    await Promise.all(unresolved.slice(i, i + batchSize).map(async (code) => {
+      const row = await fetchRouterUserByName(api, '/tool/user-manager/user/print', umMinimalProplist(), code)
+      if (row) {
+        const name = row.username || row.name
+        if (name) byName.set(name, mapUserManagerUserRow(row))
+      }
+    }))
   }
 
   return { byName, activeUsernames, sessions: sessions || [] }
