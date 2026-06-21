@@ -1560,6 +1560,42 @@ async function fetchRouterUsersByQuery(api, path, primaryProplist, queryArgs = [
   }
 }
 
+const HS_ACTIVE_USER_QUERIES = [
+  ['?disabled=no', '?uptime>00:00:00'],
+  ['?disabled=no', '?bytes-in>0'],
+  ['?disabled=no', '?bytes-out>0'],
+]
+
+const UM_ACTIVE_USER_QUERIES = [
+  ['?disabled=no', '?actual-profile!='],
+  ['?disabled=no', '?uptime-used>00:00:00'],
+  ['?disabled=no', '?download-used>0'],
+  ['?disabled=no', '?upload-used>0'],
+]
+
+async function fetchInUseRouterUserRows(api, path, proplist, queryVariants) {
+  const merged = new Map()
+
+  for (const queryArgs of queryVariants) {
+    try {
+      const rows = await fetchRouterUsersByQuery(api, path, proplist, queryArgs)
+      for (const row of rows) {
+        const key = row.name || row.username || row['.id']
+        if (key) merged.set(String(key), row)
+      }
+      if (rows.length > 0) {
+        console.info(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} => ${rows.length}`)
+      }
+    } catch (error) {
+      if (!isUserManagerUnavailable(error)) {
+        console.warn(`[mikrotik] active-users query failed ${path} ${queryArgs.join(' ')}: ${error.message}`)
+      }
+    }
+  }
+
+  return [...merged.values()]
+}
+
 export async function getInventoryCount(filterOptions = {}) {
   const refresh = filterOptions.refresh === true || filterOptions.refresh === '1'
   const filter = resolveInventoryFilter(filterOptions)
@@ -2737,10 +2773,9 @@ export async function getActiveUsers(options = {}) {
       umUsersRaw,
       umSessionsRaw,
       umProfilesRaw,
-      umUserProfileMap,
     ] = await Promise.all([
       includeHotspot
-        ? printWithProplistFallback(api, '/ip/hotspot/user/print', HS_USER_PROPS[0]).catch(() => [])
+        ? fetchInUseRouterUserRows(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], HS_ACTIVE_USER_QUERIES)
         : Promise.resolve([]),
       includeHotspot
         ? api.write('/ip/hotspot/active/print', ['=.proplist=user,address,mac-address,uptime']).catch(() => [])
@@ -2749,20 +2784,21 @@ export async function getActiveUsers(options = {}) {
         ? api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
-        ? printWithProplistFallback(api, '/tool/user-manager/user/print', UM_USER_PROPS).catch((error) => {
-          if (isUserManagerUnavailable(error)) return []
-          throw error
-        })
+        ? fetchInUseRouterUserRows(api, '/tool/user-manager/user/print', UM_USER_PROPS[0], UM_ACTIVE_USER_QUERIES)
+          .catch((error) => {
+            if (isUserManagerUnavailable(error)) return []
+            throw error
+          })
         : Promise.resolve([]),
       includeUserManager
         ? api.write('/tool/user-manager/session/print', [
+          '?active=yes',
           '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active',
         ]).catch(() => [])
         : Promise.resolve([]),
       includeUserManager
         ? api.write('/tool/user-manager/profile/print').catch(() => [])
         : Promise.resolve([]),
-      includeUserManager ? fetchUmUserProfileNameMap(api) : Promise.resolve(new Map()),
     ])
 
     const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
@@ -2772,10 +2808,7 @@ export async function getActiveUsers(options = {}) {
       : {}
     const umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
 
-    const umSessions = (umSessionsRaw || []).filter((s) => {
-      const active = s.active
-      return active === true || active === 'true' || active === 'yes' || active == null
-    })
+    const umSessions = umSessionsRaw || []
 
     const rows = []
 
@@ -2794,8 +2827,7 @@ export async function getActiveUsers(options = {}) {
 
     if (includeUserManager) {
       for (const raw of umUsersRaw || []) {
-        const userName = raw.name || raw.username || ''
-        const user = mapUserManagerUserRow(raw, umUserProfileMap.get(userName) || '')
+        const user = mapUserManagerUserRow(raw, '')
         const { status } = resolveUserManagerCardStatus(user, umProfileNames, umProfileLimits)
         if (status !== 'active') continue
         const session = findSessionForUser(umSessions, user.name)
@@ -2808,6 +2840,8 @@ export async function getActiveUsers(options = {}) {
     }
 
     rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+    console.info(`[mikrotik] active-users result: ${rows.length} (HS candidates ${hotspotUsersRaw?.length || 0}, UM candidates ${umUsersRaw?.length || 0})`)
 
     return {
       users: rows,
