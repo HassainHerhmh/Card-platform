@@ -413,6 +413,7 @@ function scheduleBackgroundMikrotikWarm() {
     }
     try {
       await ensureRouterInventoryBuild()
+      refreshActiveUsersCacheFromInventory()
       console.info('[mikrotik] background warm: inventory done')
     } catch (error) {
       console.warn('[mikrotik] background warm: inventory failed', error.message)
@@ -422,6 +423,36 @@ function scheduleBackgroundMikrotikWarm() {
   })
 
   return backgroundWarmPromise
+}
+
+function refreshActiveUsersCacheFromInventory() {
+  const snapshot = routerInventoryCache
+  if (!snapshot?.cards?.length) return false
+
+  const sessionIndex = buildSessionIndex([
+    ...(snapshot.hotspotSessions || []),
+    ...(snapshot.umSessions || []),
+  ])
+  const umProfileLimits = new Map()
+  const activeCards = snapshot.cards.filter((card) => card.status === 'active')
+  if (!activeCards.length) return false
+
+  const rows = activeCards.map((card) => mapInventoryCardToActiveUser(card, umProfileLimits, sessionIndex))
+  rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+
+  setActiveUsersWarmCache({
+    users: rows,
+    count: rows.length,
+    summary: {
+      total: rows.length,
+      hotspot: rows.filter((r) => r.source === ROUTER_SOURCE.HOTSPOT).length,
+      userManager: rows.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
+    },
+    fetchedAt: snapshot.fetchedAt || new Date().toISOString(),
+    cached: true,
+  })
+  console.info(`[mikrotik] active-users cache from inventory: ${rows.length}`)
+  return true
 }
 
 export function getMikrotikWarmState() {
@@ -438,35 +469,20 @@ export function getMikrotikWarmState() {
 export async function warmMikrotikData() {
   console.info('[mikrotik] warm: fast start')
 
-  const [status, activeUsers] = await Promise.all([
-    fetchRouterStatusFull({ fast: true }).catch((error) => {
-      console.error('[mikrotik] warm: status failed', error.message)
-      throw error
-    }),
-    getActiveUsers({ refresh: true, source: 'all', fast: true }).catch((error) => {
-      console.warn('[mikrotik] warm: active-users failed', error.message)
-      return {
-        users: [],
-        count: 0,
-        summary: { total: 0, hotspot: 0, userManager: 0 },
-        fetchedAt: new Date().toISOString(),
-      }
-    }),
-  ])
+  const status = await fetchRouterStatusFull({ fast: true }).catch((error) => {
+    console.error('[mikrotik] warm: status failed', error.message)
+    throw error
+  })
 
   setRouterStatusCache(status)
-  if (activeUsers?.users?.length) {
-    setActiveUsersWarmCache(activeUsers)
-  }
-
   scheduleBackgroundMikrotikWarm()
 
-  console.info(`[mikrotik] warm: fast done — active ${activeUsers.count || 0}, inventory in background`)
+  console.info('[mikrotik] warm: fast done — status cached, inventory+active in background')
 
   return {
     status: getCachedRouterStatus() || status,
-    activeUsers: activeUsers.count || 0,
-    activeSummary: activeUsers.summary || null,
+    activeUsers: 0,
+    activeSummary: { total: 0, hotspot: 0, userManager: 0 },
     inventoryBackground: true,
     warmedAt: new Date().toISOString(),
   }
@@ -1915,13 +1931,29 @@ async function fetchRouterUsersByNames(api, path, proplist, names) {
 }
 
 async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sessionNames = [], options = {}) {
+  const isUmPath = path.includes('user-manager')
+  const skipFilters = options.skipFilterQueries || isUmPath
+
+  if (sessionNames.length > 0) {
+    const byName = await fetchRouterUsersByNames(api, path, proplist, sessionNames)
+    if (byName.length > 0) {
+      console.info(`[mikrotik] active-users ${path} by session names => ${byName.length}`)
+      return byName
+    }
+  }
+
+  if (skipFilters) {
+    if (isUmPath) {
+      console.info('[mikrotik] active-users UM: skipped slow router filters (use inventory cache)')
+    }
+    return []
+  }
+
   const fromQuery = await fetchActiveUserCandidates(api, path, proplist, queryVariants, options)
   if (fromQuery.length > 0) return fromQuery
 
   if (sessionNames.length > 0) {
-    const byName = await fetchRouterUsersByNames(api, path, proplist, sessionNames)
-    console.info(`[mikrotik] active-users ${path} by session names => ${byName.length}`)
-    return byName
+    console.info(`[mikrotik] active-users ${path} by session names => 0`)
   }
 
   return []
@@ -3210,6 +3242,18 @@ export async function getActiveUsers(options = {}) {
   const refresh = options.refresh === true || options.refresh === '1'
   const fast = options.fast === true
 
+  if (refresh && routerInventoryCache?.cards?.length) {
+    try {
+      const fromInventory = await getActiveUsersFromInventoryFilter(sourceFilter)
+      if (fromInventory?.users?.length) {
+        setActiveUsersWarmCache(fromInventory)
+        return fromInventory
+      }
+    } catch (error) {
+      console.warn('[mikrotik] active-users inventory refresh failed:', error.message)
+    }
+  }
+
   if (!refresh) {
     const warmCached = tryActiveUsersWarmCache(sourceFilter)
     if (warmCached) return warmCached
@@ -3224,6 +3268,7 @@ export async function getActiveUsers(options = {}) {
     }
 
     if (isQuickLoginEnabled()) {
+      const building = Boolean(routerInventoryBuildPromise || backgroundWarmPromise)
       return {
         users: [],
         count: 0,
@@ -3231,7 +3276,10 @@ export async function getActiveUsers(options = {}) {
         fetchedAt: new Date().toISOString(),
         cached: false,
         quickLogin: true,
-        message: 'الدخول السريع مفعّل — اضغط «تحديث» لجلب النشطين من الراوتر',
+        building,
+        message: building
+          ? 'جاري تحميل المخزون في الخلفية — انتظر قليلاً ثم حدّث'
+          : 'اضغط «تحديث» لجلب النشطين من الراوتر',
       }
     }
   }
