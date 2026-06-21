@@ -177,7 +177,10 @@ router.get('/user-manager/customers', async (_req, res) => {
 
 router.get('/active-users', async (req, res) => {
   try {
-    const data = await getActiveUsers({ source: req.query.source || 'all' })
+    const data = await getActiveUsers({
+      source: req.query.source || 'all',
+      refresh: req.query.refresh === '1' || req.query.refresh === 'true',
+    })
     res.json(data)
   } catch (error) {
     console.error(error)

@@ -119,11 +119,13 @@ async function closeRouter(api) {
   }
 }
 
-async function withConnection(fn) {
-  const { cfg, api, operationTimeout } = createRouterApi(false)
+async function withConnection(fn, options = {}) {
+  const forInventory = options.inventory === true
+  const { cfg, api, operationTimeout } = createRouterApi(forInventory)
+  const opTimeout = options.operationTimeoutSec ?? operationTimeout
 
   try {
-    await connectRouter(api, operationTimeout)
+    await connectRouter(api, opTimeout)
     return await fn(api, cfg)
   } finally {
     await closeRouter(api)
@@ -1561,39 +1563,164 @@ async function fetchRouterUsersByQuery(api, path, primaryProplist, queryArgs = [
 }
 
 const HS_ACTIVE_USER_QUERIES = [
+  ['?disabled=no', '?active-sessions>0'],
   ['?disabled=no', '?uptime>00:00:00'],
   ['?disabled=no', '?bytes-in>0'],
   ['?disabled=no', '?bytes-out>0'],
 ]
 
 const UM_ACTIVE_USER_QUERIES = [
+  ['?disabled=no', '?active-sessions>0'],
   ['?disabled=no', '?actual-profile!='],
   ['?disabled=no', '?uptime-used>00:00:00'],
   ['?disabled=no', '?download-used>0'],
-  ['?disabled=no', '?upload-used>0'],
 ]
 
-async function fetchInUseRouterUserRows(api, path, proplist, queryVariants) {
-  const merged = new Map()
+const ACTIVE_USERS_QUERY_TIMEOUT_MS = 7000
+const ACTIVE_USERS_MAX_CANDIDATES = 400
+const ACTIVE_USERS_NAME_BATCH = 12
 
-  for (const queryArgs of queryVariants) {
-    try {
-      const rows = await fetchRouterUsersByQuery(api, path, proplist, queryArgs)
-      for (const row of rows) {
-        const key = row.name || row.username || row['.id']
-        if (key) merged.set(String(key), row)
-      }
-      if (rows.length > 0) {
-        console.info(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} => ${rows.length}`)
-      }
-    } catch (error) {
-      if (!isUserManagerUnavailable(error)) {
-        console.warn(`[mikrotik] active-users query failed ${path} ${queryArgs.join(' ')}: ${error.message}`)
-      }
+async function routerWriteWithTimeout(api, path, args, timeoutMs = ACTIVE_USERS_QUERY_TIMEOUT_MS) {
+  return Promise.race([
+    api.write(path, args),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('ACTIVE_QUERY_TIMEOUT')), timeoutMs)
+    }),
+  ])
+}
+
+async function fetchRouterUsersByQueryCapped(api, path, proplist, queryArgs = []) {
+  try {
+    const rows = await routerWriteWithTimeout(api, path, [proplist, ...queryArgs])
+    if (!Array.isArray(rows)) return []
+    if (rows.length > ACTIVE_USERS_MAX_CANDIDATES) {
+      console.warn(`[mikrotik] active-users ${path} ${queryArgs.join(' ')} returned ${rows.length} rows — filter ignored`)
+      return []
+    }
+    return dedupeRouterRows(rows)
+  } catch (error) {
+    if (isUserManagerUnavailable(error)) return []
+    if (error.message === 'ACTIVE_QUERY_TIMEOUT') return []
+    throw error
+  }
+}
+
+async function fetchRouterUsersByNames(api, path, proplist, names) {
+  const unique = [...new Set((names || []).map((n) => String(n).trim()).filter(Boolean))]
+  if (!unique.length) return []
+
+  const rows = []
+  for (let i = 0; i < unique.length; i += ACTIVE_USERS_NAME_BATCH) {
+    const batch = unique.slice(i, i + ACTIVE_USERS_NAME_BATCH)
+    const chunk = await Promise.all(batch.map((name) => (
+      routerWriteWithTimeout(api, path, [proplist, `?name=${name}`], ACTIVE_USERS_QUERY_TIMEOUT_MS)
+        .then((result) => (Array.isArray(result) ? result[0] : null))
+        .catch(() => null)
+    )))
+    rows.push(...chunk.filter(Boolean))
+  }
+  return dedupeRouterRows(rows)
+}
+
+async function fetchInUseRouterUserRows(api, path, proplist, queryVariants, sessionNames = []) {
+  const attempts = await Promise.allSettled(
+    queryVariants.map((queryArgs) => fetchRouterUsersByQueryCapped(api, path, proplist, queryArgs))
+  )
+
+  const merged = new Map()
+  for (const attempt of attempts) {
+    if (attempt.status !== 'fulfilled') continue
+    for (const row of attempt.value) {
+      const key = row.name || row.username || row['.id']
+      if (key) merged.set(String(key), row)
     }
   }
 
-  return [...merged.values()]
+  if (merged.size > 0) {
+    console.info(`[mikrotik] active-users ${path} filtered => ${merged.size}`)
+    return [...merged.values()]
+  }
+
+  if (sessionNames.length > 0) {
+    const byName = await fetchRouterUsersByNames(api, path, proplist, sessionNames)
+    console.info(`[mikrotik] active-users ${path} by session names => ${byName.length}`)
+    return byName
+  }
+
+  return []
+}
+
+function buildLightUmProfileLimits(profilesRaw) {
+  const index = new Map()
+  for (const profile of profilesRaw || []) {
+    if (!profile?.name) continue
+    index.set(profile.name, {
+      'uptime-limit': profile['uptime-limit'] || '',
+      'download-limit': profile['download-limit'] || '',
+      'upload-limit': profile['upload-limit'] || '',
+      'transfer-limit': profile['transfer-limit'] || '',
+    })
+  }
+  return index
+}
+
+function mapInventoryCardToActiveUser(card, umProfileLimits) {
+  const session = card.connectedIp
+    ? {
+      address: card.connectedIp,
+      'ip-address': card.connectedIp,
+      uptime: card.sessionUptime || '',
+    }
+    : null
+  const user = {
+    name: card.name,
+    uptime: card.uptime || card.sessionUptime || '',
+    limitUptime: card.limitUptime || '',
+    limitBytesIn: card.limitBytesIn || '',
+    limitBytesOut: card.limitBytesOut || '',
+    bytesIn: card.bytesIn || '',
+    bytesOut: card.bytesOut || '',
+    profile: card.profile || card.packageLabel || '',
+    actualProfile: card.actualProfile || card.profile || '',
+    assignedProfile: card.assignedProfile || card.profile || '',
+    packageLabel: card.packageLabel || card.profile || '',
+  }
+  return mapActiveUserRow(user, session, {
+    source: card.source,
+    sourceLabel: card.sourceLabelAr || card.sourceLabel || '',
+    profileLimits: umProfileLimits,
+  })
+}
+
+function tryActiveUsersFromInventoryCache(sourceFilter) {
+  const snapshot = routerInventoryCache
+  if (!snapshot?.cards?.length) return null
+  if (Date.now() - routerInventoryCacheAt > ROUTER_INVENTORY_CACHE_MS) return null
+
+  let cards = snapshot.cards.filter((c) => c.status === 'active')
+  if (sourceFilter === ROUTER_SOURCE.HOTSPOT) {
+    cards = cards.filter((c) => c.source === ROUTER_SOURCE.HOTSPOT)
+  } else if (sourceFilter === ROUTER_SOURCE.USER_MANAGER) {
+    cards = cards.filter((c) => c.source === ROUTER_SOURCE.USER_MANAGER)
+  }
+
+  if (!cards.length) return null
+
+  const umProfileLimits = new Map()
+  const rows = cards.map((card) => mapInventoryCardToActiveUser(card, umProfileLimits))
+
+  rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+  return {
+    users: rows,
+    count: rows.length,
+    summary: {
+      total: rows.length,
+      hotspot: rows.filter((r) => r.source === ROUTER_SOURCE.HOTSPOT).length,
+      userManager: rows.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
+    },
+    fetchedAt: snapshot.fetchedAt || new Date().toISOString(),
+    cached: true,
+  }
 }
 
 export async function getInventoryCount(filterOptions = {}) {
@@ -2764,50 +2891,84 @@ export async function getActiveUsers(options = {}) {
       : 'all'
   const includeHotspot = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.HOTSPOT
   const includeUserManager = sourceFilter === 'all' || sourceFilter === ROUTER_SOURCE.USER_MANAGER
+  const refresh = options.refresh === true || options.refresh === '1'
+
+  if (!refresh) {
+    const cached = tryActiveUsersFromInventoryCache(sourceFilter)
+    if (cached) return cached
+  }
 
   return withConnection(async (api) => {
     const [
-      hotspotUsersRaw,
       activeHotspotSessions,
-      hotspotProfilesRaw,
-      umUsersRaw,
       umSessionsRaw,
+      hotspotProfilesRaw,
       umProfilesRaw,
     ] = await Promise.all([
       includeHotspot
-        ? fetchInUseRouterUserRows(api, '/ip/hotspot/user/print', HS_USER_PROPS[0], HS_ACTIVE_USER_QUERIES)
+        ? routerWriteWithTimeout(
+          api,
+          '/ip/hotspot/active/print',
+          ['=.proplist=user,address,mac-address,uptime'],
+          ACTIVE_USERS_QUERY_TIMEOUT_MS
+        ).catch(() => [])
+        : Promise.resolve([]),
+      includeUserManager
+        ? routerWriteWithTimeout(
+          api,
+          '/tool/user-manager/session/print',
+          ['?active=yes', '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active'],
+          ACTIVE_USERS_QUERY_TIMEOUT_MS
+        ).catch(() => [])
         : Promise.resolve([]),
       includeHotspot
-        ? api.write('/ip/hotspot/active/print', ['=.proplist=user,address,mac-address,uptime']).catch(() => [])
+        ? routerWriteWithTimeout(
+          api,
+          '/ip/hotspot/user/profile/print',
+          ['=.proplist=name'],
+          ACTIVE_USERS_QUERY_TIMEOUT_MS
+        ).catch(() => [])
         : Promise.resolve([]),
+      includeUserManager
+        ? routerWriteWithTimeout(
+          api,
+          '/tool/user-manager/profile/print',
+          ['=.proplist=name,uptime-limit,download-limit,upload-limit,transfer-limit'],
+          ACTIVE_USERS_QUERY_TIMEOUT_MS
+        ).catch(() => [])
+        : Promise.resolve([]),
+    ])
+
+    const hsSessionNames = (activeHotspotSessions || []).map((s) => s.user).filter(Boolean)
+    const umSessionNames = (umSessionsRaw || []).map((s) => s.user || s.username).filter(Boolean)
+
+    const [hotspotUsersRaw, umUsersRaw] = await Promise.all([
       includeHotspot
-        ? api.write('/ip/hotspot/user/profile/print', ['=.proplist=name']).catch(() => [])
+        ? fetchInUseRouterUserRows(
+          api,
+          '/ip/hotspot/user/print',
+          HS_USER_PROPS[0],
+          HS_ACTIVE_USER_QUERIES,
+          hsSessionNames
+        )
         : Promise.resolve([]),
       includeUserManager
-        ? fetchInUseRouterUserRows(api, '/tool/user-manager/user/print', UM_USER_PROPS[0], UM_ACTIVE_USER_QUERIES)
-          .catch((error) => {
-            if (isUserManagerUnavailable(error)) return []
-            throw error
-          })
-        : Promise.resolve([]),
-      includeUserManager
-        ? api.write('/tool/user-manager/session/print', [
-          '?active=yes',
-          '=.proplist=user,username,ip-address,address,uptime,calling-station-id,active',
-        ]).catch(() => [])
-        : Promise.resolve([]),
-      includeUserManager
-        ? api.write('/tool/user-manager/profile/print').catch(() => [])
+        ? fetchInUseRouterUserRows(
+          api,
+          '/tool/user-manager/user/print',
+          UM_USER_PROPS[0],
+          UM_ACTIVE_USER_QUERIES,
+          umSessionNames
+        ).catch((error) => {
+          if (isUserManagerUnavailable(error)) return []
+          throw error
+        })
         : Promise.resolve([]),
     ])
 
     const hotspotProfileNames = new Set((hotspotProfilesRaw || []).map((p) => p.name).filter(Boolean))
     const umProfileNames = new Set((umProfilesRaw || []).map((p) => p.name).filter(Boolean))
-    const limitsByProfile = includeUserManager
-      ? await fetchUserManagerLimitationData(api, umProfilesRaw)
-      : {}
-    const umProfileLimits = buildUmProfileLimitsIndex(umProfilesRaw, limitsByProfile)
-
+    const umProfileLimits = buildLightUmProfileLimits(umProfilesRaw)
     const umSessions = umSessionsRaw || []
 
     const rows = []
@@ -2841,7 +3002,7 @@ export async function getActiveUsers(options = {}) {
 
     rows.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
 
-    console.info(`[mikrotik] active-users result: ${rows.length} (HS candidates ${hotspotUsersRaw?.length || 0}, UM candidates ${umUsersRaw?.length || 0})`)
+    console.info(`[mikrotik] active-users live: ${rows.length} (HS ${hotspotUsersRaw?.length || 0}, UM ${umUsersRaw?.length || 0})`)
 
     return {
       users: rows,
@@ -2852,8 +3013,9 @@ export async function getActiveUsers(options = {}) {
         userManager: rows.filter((r) => r.source === ROUTER_SOURCE.USER_MANAGER).length,
       },
       fetchedAt: new Date().toISOString(),
+      cached: false,
     }
-  })
+  }, { operationTimeoutSec: 60 })
 }
 
 export async function getCombinedInventory(options = {}) {
