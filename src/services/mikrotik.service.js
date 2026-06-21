@@ -507,6 +507,7 @@ export async function getRouterStatus(options = {}) {
       const resource = resourceRows?.[0] || {}
 
       if (isQuickLoginEnabled() && !refresh) {
+        const cached = getCachedRouterStatus()
         const lightweight = {
           connected: true,
           configured: true,
@@ -530,6 +531,22 @@ export async function getRouterStatus(options = {}) {
           totalCards: null,
           cpuLoad: resource['cpu-load'] ?? null,
           message: `متصل — ${identity.name || connection.host}`,
+        }
+        if (cached) {
+          return {
+            ...lightweight,
+            hotspotUsers: cached.hotspotUsers,
+            activeHotspotUsers: cached.activeHotspotUsers,
+            userManagerUsers: cached.userManagerUsers,
+            userManagerSessionsTotal: cached.userManagerSessionsTotal,
+            activeUserManagerSessions: cached.activeUserManagerSessions,
+            connectedUsers: cached.connectedUsers,
+            activeUsers: cached.activeUsers,
+            neighborCount: cached.neighborCount,
+            userManager: cached.userManager,
+            totalCards: cached.totalCards,
+            cached: true,
+          }
         }
         return lightweight
       }
