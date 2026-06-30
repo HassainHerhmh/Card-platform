@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS ledger (
 CREATE TABLE IF NOT EXISTS mikrotik_routers (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
+  display_name VARCHAR(255) NULL,
+  logo_url MEDIUMTEXT NULL,
   ip VARCHAR(100) NOT NULL,
   cards_printed INT DEFAULT 0
 );

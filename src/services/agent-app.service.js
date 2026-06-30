@@ -1,31 +1,42 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
 import { syncAgentPendingCardsWithRouter } from './mikrotik.service.js'
+import { countAgentPendingCards } from './mikrotik-network.service.js'
 
-export async function getNetworks() {
-  const { rows } = await query(
-    'SELECT id, name, ip, cards_printed AS cardsPrinted FROM mikrotik_routers ORDER BY id'
-  )
-  return rows.map((row) => ({
+function mapNetworkRow(row, agentStock = 0) {
+  return {
     id: row.id,
-    name: row.name,
+    name: row.displayName || row.name,
+    displayName: row.displayName || row.name,
+    logoUrl: row.logoUrl || '',
     ip: row.ip,
     cardsPrinted: Number(row.cardsPrinted) || 0,
-  }))
+    agentStock,
+  }
 }
 
-export async function getNetworkById(id) {
+export async function getNetworks(agentId) {
+  const agentStock = agentId ? await countAgentPendingCards(agentId) : 0
   const { rows } = await query(
-    'SELECT id, name, ip, cards_printed AS cardsPrinted FROM mikrotik_routers WHERE id = $1',
+    `SELECT id, name, display_name AS displayName, logo_url AS logoUrl,
+            ip, cards_printed AS cardsPrinted
+     FROM mikrotik_routers
+     ORDER BY id`
+  )
+  return rows.map((row) => mapNetworkRow(row, agentStock))
+}
+
+export async function getNetworkById(id, agentId) {
+  const agentStock = agentId ? await countAgentPendingCards(agentId) : 0
+  const { rows } = await query(
+    `SELECT id, name, display_name AS displayName, logo_url AS logoUrl,
+            ip, cards_printed AS cardsPrinted
+     FROM mikrotik_routers
+     WHERE id = $1`,
     [id]
   )
   if (!rows[0]) return null
-  return {
-    id: rows[0].id,
-    name: rows[0].name,
-    ip: rows[0].ip,
-    cardsPrinted: Number(rows[0].cardsPrinted) || 0,
-  }
+  return mapNetworkRow(rows[0], agentStock)
 }
 
 export async function getCategoriesForAgent(agentId) {

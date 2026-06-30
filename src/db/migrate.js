@@ -65,6 +65,8 @@ export async function migrate() {
       quick_login TINYINT(1) NOT NULL DEFAULT 1,
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     )`,
+    'ALTER TABLE mikrotik_routers ADD COLUMN display_name VARCHAR(255) NULL',
+    'ALTER TABLE mikrotik_routers ADD COLUMN logo_url MEDIUMTEXT NULL',
   ]
 
   for (const patch of patches) {
@@ -73,6 +75,16 @@ export async function migrate() {
     } catch (error) {
       if (error.code !== 'ER_DUP_FIELDNAME') throw error
     }
+  }
+
+  try {
+    await pool.execute(`
+      UPDATE mikrotik_routers
+      SET display_name = name
+      WHERE display_name IS NULL OR TRIM(display_name) = ''
+    `)
+  } catch (error) {
+    console.warn('mikrotik_routers display_name backfill skipped:', error.message)
   }
 
   try {

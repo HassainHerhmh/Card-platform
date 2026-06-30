@@ -7,6 +7,10 @@ import {
   testMikrotikConnection,
 } from '../services/mikrotik-connection.service.js'
 import {
+  getNetworkSettings,
+  updateNetworkSettings,
+} from '../services/mikrotik-network.service.js'
+import {
   getRouterStatus,
   getHotspotProfiles,
   getHotspotUsers,
@@ -77,6 +81,26 @@ router.post('/connection/test', async (req, res) => {
   }
 })
 
+router.get('/network-settings', async (_req, res) => {
+  try {
+    const network = await getNetworkSettings()
+    res.json({ network })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب إعدادات الشبكة' })
+  }
+})
+
+router.patch('/network-settings', async (req, res) => {
+  try {
+    const network = await updateNetworkSettings(req.body || {})
+    res.json({ network })
+  } catch (error) {
+    console.error(error)
+    res.status(400).json({ message: error.message || 'تعذر حفظ إعدادات الشبكة' })
+  }
+})
+
 router.get('/routers', async (_req, res) => {
   try {
     const status = await getRouterStatus()
@@ -86,14 +110,21 @@ router.get('/routers', async (_req, res) => {
     }
 
     const { rows } = await query(
-      'SELECT id, name, ip, cards_printed AS cardsPrinted FROM mikrotik_routers ORDER BY id LIMIT 1'
+      `SELECT id, name, display_name AS displayName, logo_url AS logoUrl,
+              ip, cards_printed AS cardsPrinted
+       FROM mikrotik_routers
+       ORDER BY id
+       LIMIT 1`
     )
     const main = rows[0]
+    const displayName = main?.displayName || main?.name || status.identity || 'راوتر الرئيسي'
 
     const routers = main
       ? [{
           ...main,
-          name: status.identity || main.name,
+          name: displayName,
+          displayName,
+          routerIdentity: status.identity || main.name,
           ip: status.host || main.ip,
           status: status.connected ? 'متصل' : 'غير متصل',
           version: status.version,
@@ -108,7 +139,9 @@ router.get('/routers', async (_req, res) => {
       : status.host
         ? [{
             id: 0,
-            name: status.identity || 'MikroTik',
+            name: displayName,
+            displayName,
+            routerIdentity: status.identity || 'MikroTik',
             ip: status.host,
             cardsPrinted: liveCount,
             status: status.connected ? 'متصل' : 'غير متصل',

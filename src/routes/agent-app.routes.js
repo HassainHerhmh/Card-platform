@@ -18,9 +18,9 @@ router.get('/me', async (req, res) => {
   }
 })
 
-router.get('/networks', async (_req, res) => {
+router.get('/networks', async (req, res) => {
   try {
-    const networks = await agentAppService.getNetworks()
+    const networks = await agentAppService.getNetworks(req.agent.id)
     res.json({ networks })
   } catch (error) {
     console.error(error)
@@ -30,7 +30,7 @@ router.get('/networks', async (_req, res) => {
 
 router.get('/networks/:id', async (req, res) => {
   try {
-    const network = await agentAppService.getNetworkById(+req.params.id)
+    const network = await agentAppService.getNetworkById(+req.params.id, req.agent.id)
     if (!network) return res.status(404).json({ message: 'الشبكة غير موجودة' })
     res.json({ network })
   } catch (error) {
@@ -41,7 +41,7 @@ router.get('/networks/:id', async (req, res) => {
 
 router.get('/networks/:id/categories', async (req, res) => {
   try {
-    const network = await agentAppService.getNetworkById(+req.params.id)
+    const network = await agentAppService.getNetworkById(+req.params.id, req.agent.id)
     if (!network) return res.status(404).json({ message: 'الشبكة غير موجودة' })
     const categories = await agentAppService.getCategoriesForAgent(req.agent.id)
     res.json({ network, categories })
