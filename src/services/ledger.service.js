@@ -1,6 +1,7 @@
 import { query } from '../db/pool.js'
 import { formatDate } from '../utils/format.js'
 import { formatCurrency } from '../constants/currency.js'
+import { createDeliveryNotification } from './agent-notifications.service.js'
 import {
   postCardBatchDeliveryJournal,
   hasBatchDeliveryJournal,
@@ -101,6 +102,7 @@ export async function recordBatchDelivery({ agentId, batchId, categoryName, coun
   const agent = await getAgentRow(agentId)
   const description = `تسليم دفعة ${count} كرت — فئة ${categoryName} — ${formatCurrency(total)}`
 
+  let result
   if (agent.accountId) {
     const exists = await hasBatchDeliveryJournal(batchId)
     if (!exists) {
@@ -112,17 +114,31 @@ export async function recordBatchDelivery({ agentId, batchId, categoryName, coun
         journalDate: await getLocalJournalDate(),
       })
     }
-    return { journal: true, balance: null }
+    result = { journal: true, balance: null }
+  } else {
+    result = await appendLedgerEntry({
+      agentId,
+      type: 'تسليم كروت',
+      cards: count,
+      debit: total,
+      description,
+      referenceId: batchId,
+    })
   }
 
-  return appendLedgerEntry({
-    agentId,
-    type: 'تسليم كروت',
-    cards: count,
-    debit: total,
-    description,
-    referenceId: batchId,
-  })
+  try {
+    await createDeliveryNotification({
+      agentId,
+      batchId,
+      categoryName,
+      count,
+      amount: total,
+    })
+  } catch (error) {
+    console.warn('[notifications] delivery notification skipped:', error.message)
+  }
+
+  return result
 }
 
 export async function syncMissingBatchJournals({ limit = 100 } = {}) {

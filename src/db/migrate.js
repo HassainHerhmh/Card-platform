@@ -67,6 +67,22 @@ export async function migrate() {
     )`,
     'ALTER TABLE mikrotik_routers ADD COLUMN display_name VARCHAR(255) NULL',
     'ALTER TABLE mikrotik_routers ADD COLUMN logo_url MEDIUMTEXT NULL',
+    `CREATE TABLE IF NOT EXISTS agent_notifications (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      agent_id INT NOT NULL,
+      batch_id INT NULL,
+      type VARCHAR(30) NOT NULL DEFAULT 'delivery',
+      category_name VARCHAR(255) NOT NULL DEFAULT '',
+      card_count INT NOT NULL DEFAULT 0,
+      amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
+      title VARCHAR(255) NOT NULL,
+      body VARCHAR(500) NOT NULL,
+      is_read TINYINT(1) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+      INDEX idx_agent_notifications_agent (agent_id, is_read, created_at),
+      UNIQUE KEY uniq_agent_batch_delivery (agent_id, batch_id, type)
+    )`,
   ]
 
   for (const patch of patches) {

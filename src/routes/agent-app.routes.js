@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { requireAgentAuth } from '../middleware/agentAuth.js'
 import * as agentAppService from '../services/agent-app.service.js'
 import * as agentNotebookService from '../services/agent-notebook.service.js'
+import * as agentNotificationsService from '../services/agent-notifications.service.js'
 import * as smsGatewayService from '../services/sms-gateway.service.js'
 
 const router = Router()
@@ -58,6 +59,50 @@ router.get('/transactions', async (req, res) => {
   } catch (error) {
     console.error(error)
     res.status(500).json({ message: 'تعذر جلب العمليات' })
+  }
+})
+
+router.get('/notifications', async (req, res) => {
+  try {
+    const notifications = await agentNotificationsService.getAgentNotifications(req.agent.id, {
+      limit: req.query.limit,
+    })
+    const unreadCount = await agentNotificationsService.getUnreadNotificationCount(req.agent.id)
+    res.json({ notifications, unreadCount })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب الإشعارات' })
+  }
+})
+
+router.get('/notifications/unread-count', async (req, res) => {
+  try {
+    const unreadCount = await agentNotificationsService.getUnreadNotificationCount(req.agent.id)
+    res.json({ unreadCount })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر جلب عدد الإشعارات' })
+  }
+})
+
+router.patch('/notifications/read-all', async (req, res) => {
+  try {
+    await agentNotificationsService.markAllNotificationsRead(req.agent.id)
+    res.json({ ok: true, unreadCount: 0 })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر تحديث الإشعارات' })
+  }
+})
+
+router.patch('/notifications/:id/read', async (req, res) => {
+  try {
+    await agentNotificationsService.markNotificationRead(req.agent.id, +req.params.id)
+    const unreadCount = await agentNotificationsService.getUnreadNotificationCount(req.agent.id)
+    res.json({ ok: true, unreadCount })
+  } catch (error) {
+    console.error(error)
+    res.status(500).json({ message: 'تعذر تحديث الإشعار' })
   }
 })
 
